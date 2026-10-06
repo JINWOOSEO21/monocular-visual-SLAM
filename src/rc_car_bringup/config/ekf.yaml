@@ -1,0 +1,68 @@
+### robot_localization EKF — wheel odom + IMU 융합
+### 입력:  /odom (wheel_odometry)  +  /imu/data (madgwick filtered)
+### 출력:  /odometry/filtered  +  TF: odom → base_link
+
+ekf_filter_node:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.1
+    two_d_mode: true                # 평면 주행 (z, roll, pitch 고정)
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+    print_diagnostics: true
+    debug: false
+    publish_tf: true
+    publish_acceleration: false
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+
+    # ── odom0: 휠 오도메트리 (twist만 사용 — pose는 슬립 누적되므로 제외)
+    odom0: /odom
+    # 행렬 순서: [x, y, z, roll, pitch, yaw,
+    #            vx, vy, vz, vroll, vpitch, vyaw,
+    #            ax, ay, az]
+    # vy=true → 비홀로노믹 제약 (옆방향 속도=0) → yaw 드리프트로 인한 y 발산 방지
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, true,
+                   false, false, false]
+    odom0_queue_size: 10
+    odom0_differential: false
+    odom0_relative: false
+    odom0_nodelay: true
+
+    # ── imu0: MPU6050 + madgwick
+    # yaw는 differential 모드 — madgwick의 ENU 절대 기준에 의존하지 않고 변화량만 사용
+    # v_yaw도 융합하여 회전 정확도 향상
+    # 가속도는 RC카 진동으로 노이즈 큼 → 제외
+    imu0: /imu/data
+    imu0_config: [false, false, false,
+                  false, false, true,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_queue_size: 10
+    imu0_differential: true
+    imu0_relative: false
+    imu0_nodelay: true
+
+    # ── 프로세스 노이즈 (15x15 대각, 기본값에서 약간 보수적으로)
+    process_noise_covariance: [0.05, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.05, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.06, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.03, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.03, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.06, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.025,0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.025,0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.04, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.02, 0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.015]

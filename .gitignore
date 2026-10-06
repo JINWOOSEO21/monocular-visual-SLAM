@@ -1,0 +1,26 @@
+# ROS2 build artifacts
+/build/
+/install/
+/log/
+
+# third_party build output (scripts/build_third_party.sh). The per-library
+# build trees are ignored by third_party/*/.gitignore.
+/third_party/install/
+
+# Python artifacts
+**/__pycache__/
+**/*.pyc
+
+# OS generated files
+.DS_Store
+
+# Claude
+CLAUDE.md
+.claude/
+.omc/
+
+# Text file
+*.pdf
+*.gv
+*.csv
+*.npy

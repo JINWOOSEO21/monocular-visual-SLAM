@@ -1,0 +1,58 @@
+pid_controller_node:
+  ros__parameters:
+
+    # ── GPIO pins (BCM numbering) ────────────────────────────────
+    left_ena_pin:  24    # ENA  — left  PWM enable
+    left_in1_pin:  22    # IN1  — left  direction A
+    left_in2_pin:  23    # IN2  — left  direction B
+    right_enb_pin: 25    # ENB  — right PWM enable
+    right_in3_pin: 27    # IN3  — right direction A
+    right_in4_pin: 26    # IN4  — right direction B
+
+    # ── Wheel geometry ───────────────────────────────────────────
+    wheel_base:     0.150   # m
+    wheel_diameter: 0.065   # m
+    pulses_per_rev: 40.0    # ticks/revolution (BOTH edge mode)
+    # dist_per_tick = pi * 0.065 / 40 = 0.005105 m (computed in node)
+
+    # ── Wiring polarity ──────────────────────────────────────────
+    # True = L298N IN pins are wired in reverse for that motor
+    left_invert:  true
+    right_invert: true
+
+    # ── PWM ──────────────────────────────────────────────────────
+    pwm_frequency: 1000.0   # Hz
+    max_pwm:       100.0    # %
+
+    # Feedforward model from measured duty-to-velocity fit:
+    #   velocity [m/s] = ff_velocity_slope * duty [%] + ff_velocity_intercept
+    # The controller applies:
+    #   duty = inverse_model(target_v) + Kp*error + Ki*integral + Kd*d_error
+    ff_velocity_slope:     0.00446
+    ff_velocity_intercept: 0.217
+
+    # ── PID gains — left wheel ───────────────────────────────────
+    # Output unit: raw duty correction; final duty is clipped after feedforward offset
+    # Error unit : m/s  (|target| - measured, always >= 0 during normal tracking)
+    # Tuning tip : start with Ki=0, Kd=0; increase Kp until oscillation, then add Ki
+    left_kp:  300.0
+    left_ki:  40.0
+    left_kd:   0.0
+
+    # ── PID gains — right wheel ──────────────────────────────────
+    right_kp: 300.0
+    right_ki: 40.0
+    right_kd:  0.0
+
+    # ── PID limits ───────────────────────────────────────────────
+    integral_limit:  40.0   # duty % — anti-windup clamp on integral term
+    derivative_tau:   0.05  # s     — derivative low-pass filter time constant
+
+    # ── Control loop ─────────────────────────────────────────────
+    control_rate: 10.0   # Hz
+    # Note: encoder_node publishes at 50 Hz; PID at 10 Hz means each control
+    # step sees ~5 encoder messages.  vel_smooth_window averages these.
+    vel_smooth_window: 3  # number of control steps to average velocity over
+
+    # ── Safety ───────────────────────────────────────────────────
+    cmd_timeout: 0.5   # s — stop motors if /cmd_vel not received within this time
