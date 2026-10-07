@@ -70,32 +70,29 @@ IMU는 x축이 로봇 우측, y축이 전방을 향하도록 장착되어 있어
 
 ## 디렉터리 구조
 
-colcon 은 `src/` 아래를 재귀적으로 탐색하므로 패키지를 역할별 폴더로 묶어 둔다.
-폴더 이름은 빌드에 영향이 없고, 패키지 이름(`ros2 launch <패키지> ...`)도 그대로다.
-
 ```
 orb-slam/
 ├── README.md
-├── pyproject.toml                 # ruff 설정
+├── pyproject.toml              # ruff 설정
 ├── scripts/
-│   └── build_third_party.sh       # ORB-SLAM3 + Pangolin 빌드 (PC 전용, colcon 이전에 1회)
+│   └── build_third_party.sh    # ORB-SLAM3 + Pangolin 빌드 (PC 전용, colcon 이전에 1회)
 ├── src/
-│   ├── sensors/                   # [Pi] 센서 드라이버 · 오도메트리
-│   │   ├── mpu6050_driver/
-│   │   └── wheel_odometry/
-│   ├── control/                   # [Pi] 모터 제어 (둘 중 하나만 실행)
-│   │   ├── pid_velocity_controller/   # closed-loop (권장)
-│   │   └── motor_controller/          # open-loop
-│   ├── slam/                      # [PC] SLAM 백엔드
-│   │   └── orb_slam3_ros2/
-│   └── bringup/                   # [Pi + PC] launch · 설정 · 캘리브레이션
-│       └── rc_car_bringup/
-└── third_party/                   # ORB_SLAM3, Pangolin 소스 (COLCON_IGNORE)
+│   ├── imu_mpu6050/            # [Pi] MPU6050 IMU 드라이버 + 칼만 필터
+│   ├── motor_encoder/          # [Pi] 휠 엔코더 카운트 + 휠 오도메트리
+│   ├── pid_motor_controller/   # [Pi] closed-loop 모터 제어 (권장)
+│   ├── motor_controller/       # [Pi] open-loop 모터 제어 (둘 중 하나만 실행)
+│   ├── rc_car_bringup/         # [Pi] 센서 스택 · static TF · EKF · 카메라 캘리브레이션
+│   └── orb_slam/               # [PC] ORB-SLAM3 래퍼 + SLAM launch · RViz 설정
+└── third_party/                # ORB_SLAM3, Pangolin 소스 (COLCON_IGNORE)
 ```
+
+Pi 와 PC 는 같은 저장소 · 같은 브랜치를 쓴다. `orb_slam` 은 ORB-SLAM3 라이브러리가
+없으면 CMake 단계에서 스스로 빠지므로, Pi 에서 `colcon build` 를 해도 SLAM 쪽은
+빌드되지 않는다.
 
 ## 패키지
 
-### `mpu6050_driver`
+### `imu_mpu6050`
 MPU6050을 I2C로 직접 읽어 IMU 데이터를 퍼블리시한다.
 
 - **`mpu6050_node`** → `/imu/data_raw` (50 Hz), `/imu/temperature`
@@ -108,7 +105,7 @@ MPU6050을 I2C로 직접 읽어 IMU 데이터를 퍼블리시한다.
   - 지자기 센서가 없어 yaw는 자이로 적분이라 드리프트한다. EKF가 `differential` 모드로 받아 변화량만 쓴다.
 - **`scripts/calibrate_accel.py`** — 가속도계 6면 캘리브레이션 ([아래](#가속도계-캘리브레이션) 참고)
 
-### `wheel_odometry`
+### `motor_encoder`
 - **`encoder_node`** → `/encoder/ticks` (`Int32MultiArray [left, right]`, 50 Hz)
   - GPIO 인터럽트로 양쪽 엣지를 센다. **부호 없는 누적 카운트**만 퍼블리시한다.
 - **`odometry_node`** → `/odom`
@@ -117,7 +114,7 @@ MPU6050을 I2C로 직접 읽어 IMU 데이터를 퍼블리시한다.
     즉 **명령과 반대로 밀리면(슬립·외력) 오도메트리가 그 방향을 잘못 안다.**
   - TF는 EKF가 broadcast하므로 기본적으로 `publish_tf: false`.
 
-### `pid_velocity_controller` (권장 — closed-loop)
+### `pid_motor_controller` (권장 — closed-loop)
 - **`pid_controller_node`** — `/cmd_vel` + `/encoder/ticks` → PID → L298N PWM
   - 피드포워드(측정한 duty–속도 1차 모델) + PID 보정 구조.
   - 방향이 바뀌면 적분항을 리셋한다.
@@ -131,23 +128,28 @@ MPU6050을 I2C로 직접 읽어 IMU 데이터를 퍼블리시한다.
 > ⚠️ **`pid_controller_node` 와 `motor_driver_node` 를 동시에 실행하면 안 된다.**
 > 같은 GPIO 핀(ENA/ENB/IN1–4)을 제어하므로 둘 중 하나만 골라 쓴다.
 
-### `rc_car_bringup`
-런치 파일과 설정 모음.
+### `rc_car_bringup` (Pi)
+Pi 쪽 센서 스택 런치와 설정 모음.
 
 | 런치 | 실행 위치 | 내용 |
 |---|---|---|
 | `sensors.launch.py` | Pi | 카메라 + IMU + 엔코더/오도메트리 + static TF + EKF (모터 제외) |
-| `ekf.launch.py` | Pi | `robot_localization` EKF 단독 |
+| `ekf.launch.py` | Pi | `robot_localization` EKF 단독 (`config/ekf.yaml`) |
 | `sensor_tf.launch.py` | Pi | `base_link` → `camera_link` / `camera` / `imu_link` static TF |
-| `slam.launch.py` | **PC** | SLAM 진입점: 공통 입력 + ORB-SLAM3 + RViz2 |
-| `slam_inputs.launch.py` | **PC** | 공통 입력 (이미지 decompress). `slam.launch.py` 가 포함 |
-| `slam_orbslam3.launch.py` | **PC** | ORB-SLAM3 (`mono_node` + `scale_aligner`). `slam.launch.py` 가 포함 |
-| `rviz.launch.py` | **PC** | RViz2 단독 (`slam.launch.py` 가 내부적으로 포함) |
 | `intrinsic_calibration.launch.py` | Pi + PC | 카메라 내부 파라미터 캘리브레이션 ([아래](#카메라-내부-파라미터) 참고) |
-| `teleop.launch.py` | 아무데나 | `teleop_twist_keyboard` (⚠️ [동작하지 않음](#5-조종)) |
 
-### `orb_slam3_ros2` (PC 전용)
-ORB-SLAM3 단안 래퍼.
+> `intrinsic_calibration.launch.py` 는 카메라 노드를 Pi 에서 띄워야 하므로
+> (`mode:=camera`) Pi 에서도 빌드되는 이 패키지에 둔다.
+
+### `orb_slam` (PC 전용)
+ORB-SLAM3 단안 래퍼와 SLAM 실행에 필요한 런치 · 설정 전부.
+
+| 런치 | 내용 |
+|---|---|
+| `slam.launch.py` | SLAM 진입점: 아래 세 개를 묶어 실행 |
+| `slam_inputs.launch.py` | 이미지 decompress (`/camera/image_raw/compressed` → `/camera/image_decompressed`) |
+| `slam_orbslam3.launch.py` | `mono_node` + `scale_aligner` |
+| `rviz.launch.py` | RViz2 단독 (`config/slam.rviz`) |
 
 - **`mono_node`** — `/camera/image_decompressed` → `System::TrackMonocular`
   → `/orb_slam3/camera_pose`, `/orb_slam3/state`, `/orb_slam3/map_points`, 서비스 `~/save_map`
@@ -196,7 +198,7 @@ source install/setup.bash
 
 ```bash
 sudo apt install ros-humble-camera-ros ros-humble-robot-localization \
-                 ros-humble-image-transport ros-humble-teleop-twist-keyboard
+                 ros-humble-image-transport
 ```
 
 Python: `RPi.GPIO`, `smbus`, `PyYAML`
@@ -212,15 +214,15 @@ ros2 launch rc_car_bringup sensors.launch.py      # 카메라 15 Hz / JPEG q80
 ### 2. Pi — 모터 제어 (별도 터미널, 둘 중 하나만)
 
 ```bash
-ros2 launch pid_velocity_controller pid_controller.launch.py   # closed-loop (권장)
+ros2 launch pid_motor_controller pid_controller.launch.py   # closed-loop (권장)
 # 또는
-ros2 launch motor_controller motor.launch.py                   # open-loop
+ros2 launch motor_controller motor.launch.py                 # open-loop
 ```
 
 ### 3. PC — SLAM + 시각화
 
 ```bash
-ros2 launch rc_car_bringup slam.launch.py
+ros2 launch orb_slam slam.launch.py
 ```
 
 이 하나로 공통 입력(이미지 decompress) + ORB-SLAM3 + RViz2 가 같이 뜬다.
@@ -251,8 +253,8 @@ rosbag 으로 재현할 때는 `use_sim_time:=true` + `ros2 bag play <bag> --clo
 | `trajectory_path` | `~/.ros/orbslam3/kf_trajectory.txt` | 종료 시 키프레임 궤적(TUM) |
 
 ```bash
-ros2 launch rc_car_bringup slam.launch.py rviz:=false          # 뷰어 없이 (헤드리스)
-ros2 launch rc_car_bringup slam.launch.py use_viewer:=true     # 특징점/키프레임 내부까지
+ros2 launch orb_slam slam.launch.py rviz:=false          # 뷰어 없이 (헤드리스)
+ros2 launch orb_slam slam.launch.py use_viewer:=true     # 특징점/키프레임 내부까지
 ```
 
 Wi-Fi 대역폭 때문에 raw 이미지는 17 fps까지 떨어져서, Pi는 compressed만 보내고
@@ -267,7 +269,7 @@ PC가 `image_transport/republish` 로 풀어서 ORB-SLAM3 에 넣는다.
 `rviz:=false` 로 띄운 뒤 별도 터미널에서:
 
 ```bash
-ros2 launch rc_car_bringup rviz.launch.py
+ros2 launch orb_slam rviz.launch.py
 ```
 
 | Display | 토픽 | 보이는 것 |
@@ -283,22 +285,6 @@ Fixed Frame 은 `map` 이다. ORB-SLAM3 가 초기화되고 스케일이 잡히�
 > 다른 설정 파일을 쓰려면 `rviz_config:=/경로/my.rviz` 로 넘긴다.
 > 이 인자는 `slam.launch.py` 에서도 그대로 받는다.
 
-### 5. 조종
-
-```bash
-ros2 run teleop_twist_keyboard teleop_twist_keyboard
-```
-
-> ⚠️ `ros2 launch rc_car_bringup teleop.launch.py` 는 동작하지 않는다.
-> `teleop_twist_keyboard` 는 기동 시 `termios.tcgetattr(sys.stdin)` 으로 터미널
-> 설정을 읽는데, `ros2 launch` 는 자식 프로세스의 stdin 을 터미널에 연결해주지
-> 않아서 `termios.error: (25, 'Inappropriate ioctl for device')` 로 죽는다.
-> (`emulate_tty=True` 는 stdout/stderr 에만 pty 를 붙이므로 해결되지 않는다.)
-> 키 입력을 받는 노드이므로 반드시 `ros2 run` 으로 띄워야 한다.
-
-> `teleop_twist_keyboard` 는 현재 Pi에 설치돼 있지 않다. 먼저 설치해야 한다:
-> `sudo apt install ros-humble-teleop-twist-keyboard`
-
 ## 캘리브레이션
 
 ### 가속도계 캘리브레이션
@@ -310,7 +296,7 @@ MPU6050(특히 저가 GY-521 클론)은 가속도 감도 오차가 10%를 넘는
 평평하고 단단한 책상 위에서:
 
 ```bash
-python3 src/sensors/mpu6050_driver/scripts/calibrate_accel.py
+python3 src/imu_mpu6050/scripts/calibrate_accel.py
 ```
 
 6개 자세(X위/X아래/Y위/Y아래/Z위/Z아래)를 안내대로 잡아주면 축별 bias와 scale을 푼다:
@@ -320,7 +306,7 @@ bias  = (r_up + r_dn) / 2
 scale = 2g / (r_up - r_dn)
 ```
 
-결과는 `src/sensors/mpu6050_driver/config/imu_calibration.yaml` 에 저장되고,
+결과는 `src/imu_mpu6050/config/imu_calibration.yaml` 에 저장되고,
 다음 `mpu6050_node` 기동 때 자동으로 적용된다. 로그에 이렇게 뜨면 정상이다:
 
 ```
@@ -400,7 +386,7 @@ python3 ~/hw_check/test_imu_motion.py       # IMU를 기울이며 축별 반응 
   클로저가 `map → odom` 에서 보정하지만, 특징점이 부족한 구간에서는 누적된다.
 - **문서와 코드 불일치.** 일부 주석과 `rc_car_bringup/package.xml` 이 orientation
   필터로 `imu_filter_madgwick` 을 언급하지만, 실제로 실행되는 것은
-  `mpu6050_driver/imu_kalman_node` 다.
+  `imu_mpu6050/imu_kalman_node` 다.
 - **`/dev/media*` 번호는 재부팅마다 바뀐다.** libcamera가 알아서 찾으므로 보통
   문제되지 않지만, `media-ctl` 을 직접 쓸 때는 `unicam` + `imx219` 문자열로 탐색해야 한다.
 - **USB 웹캠을 꽂으면 libcamera 카메라 인덱스가 밀린다.** libcamera는 UVC 웹캠도
