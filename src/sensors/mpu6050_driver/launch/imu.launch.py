@@ -20,7 +20,7 @@ def generate_launch_description():
                         "gyro_range": 0,  # ±250 °/s
                         "calibration_samples": 1000,
                         # 가속도계 bias/scale 은 config/imu_calibration.yaml 에서 자동 적재된다.
-                        # 값을 채우려면: python3 src/mpu6050_driver/scripts/calibrate_accel.py
+                        # 값을 채우려면: python3 src/sensors/mpu6050_driver/scripts/calibrate_accel.py
                         # 다른 파일을 쓰려면 'calibration_file' 파라미터로 경로 지정.
                     }
                 ],

@@ -12,18 +12,18 @@ RMW_IMPLEMENTATION=rmw_cyclonedds_cpp, ROS_LOCALHOST_ONLY=0.
 
 사용법 (헤드리스 Pi + PC 조합):
     # Pi — 카메라만
-    ros2 launch intrinsic_calibration.launch.py mode:=camera              # CSI (기본)
-    ros2 launch intrinsic_calibration.launch.py mode:=camera camera:=usb  # C270
+    ros2 launch rc_car_bringup intrinsic_calibration.launch.py mode:=camera              # CSI (기본)
+    ros2 launch rc_car_bringup intrinsic_calibration.launch.py mode:=camera camera:=usb  # C270
 
     # PC — GUI 만 (ros-humble-camera-calibration 필요)
-    ros2 launch intrinsic_calibration.launch.py mode:=calibrator
+    ros2 launch rc_car_bringup intrinsic_calibration.launch.py mode:=calibrator
 
 사용법 (Pi 에 모니터가 붙어 있을 때):
-    ros2 launch intrinsic_calibration.launch.py                 # CSI (imx219), 기본값
-    ros2 launch intrinsic_calibration.launch.py camera:=usb     # USB 웹캠 (C270)
+    ros2 launch rc_car_bringup intrinsic_calibration.launch.py                 # CSI (imx219), 기본값
+    ros2 launch rc_car_bringup intrinsic_calibration.launch.py camera:=usb     # USB 웹캠 (C270)
 
     # USB 포트를 옮겨서 id 가 바뀐 경우 직접 지정
-    ros2 launch intrinsic_calibration.launch.py camera_id:=<id> format:=YUYV
+    ros2 launch rc_car_bringup intrinsic_calibration.launch.py camera_id:=<id> format:=YUYV
 
 mode:=calibrator 쪽은 camera/camera_id/format 인자를 쓰지 않는다. GUI 는 어느
 카메라가 열렸는지 모르고 토픽만 구독하므로, 카메라 선택은 Pi 쪽에서만 하면 된다.

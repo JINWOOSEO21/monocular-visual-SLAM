@@ -14,6 +14,7 @@
   <exec_depend>image_transport</exec_depend>
   <exec_depend>compressed_image_transport</exec_depend>
   <exec_depend>camera_ros</exec_depend>
+  <exec_depend>camera_calibration</exec_depend>  <!-- intrinsic_calibration.launch.py (PC 측 GUI) -->
   <exec_depend>mpu6050_driver</exec_depend>
   <exec_depend>imu_filter_madgwick</exec_depend>
   <exec_depend>wheel_odometry</exec_depend>

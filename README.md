@@ -68,6 +68,31 @@ map ──(scale_aligner)──▶ odom ──(EKF)──▶ base_link ──┬
 `base_link` 원점은 뒷바퀴 축 중심. 오프셋은 `rc_car_bringup/launch/sensor_tf.launch.py` 참고.
 IMU는 x축이 로봇 우측, y축이 전방을 향하도록 장착되어 있어 `yaw = -π/2` 가 걸려 있다.
 
+## 디렉터리 구조
+
+colcon 은 `src/` 아래를 재귀적으로 탐색하므로 패키지를 역할별 폴더로 묶어 둔다.
+폴더 이름은 빌드에 영향이 없고, 패키지 이름(`ros2 launch <패키지> ...`)도 그대로다.
+
+```
+orb-slam/
+├── README.md
+├── pyproject.toml                 # ruff 설정
+├── scripts/
+│   └── build_third_party.sh       # ORB-SLAM3 + Pangolin 빌드 (PC 전용, colcon 이전에 1회)
+├── src/
+│   ├── sensors/                   # [Pi] 센서 드라이버 · 오도메트리
+│   │   ├── mpu6050_driver/
+│   │   └── wheel_odometry/
+│   ├── control/                   # [Pi] 모터 제어 (둘 중 하나만 실행)
+│   │   ├── pid_velocity_controller/   # closed-loop (권장)
+│   │   └── motor_controller/          # open-loop
+│   ├── slam/                      # [PC] SLAM 백엔드
+│   │   └── orb_slam3_ros2/
+│   └── bringup/                   # [Pi + PC] launch · 설정 · 캘리브레이션
+│       └── rc_car_bringup/
+└── third_party/                   # ORB_SLAM3, Pangolin 소스 (COLCON_IGNORE)
+```
+
 ## 패키지
 
 ### `mpu6050_driver`
@@ -118,7 +143,8 @@ MPU6050을 I2C로 직접 읽어 IMU 데이터를 퍼블리시한다.
 | `slam_inputs.launch.py` | **PC** | 공통 입력 (이미지 decompress). `slam.launch.py` 가 포함 |
 | `slam_orbslam3.launch.py` | **PC** | ORB-SLAM3 (`mono_node` + `scale_aligner`). `slam.launch.py` 가 포함 |
 | `rviz.launch.py` | **PC** | RViz2 단독 (`slam.launch.py` 가 내부적으로 포함) |
-| `teleop.launch.py` | 아무데나 | `teleop_twist_keyboard` |
+| `intrinsic_calibration.launch.py` | Pi + PC | 카메라 내부 파라미터 캘리브레이션 ([아래](#카메라-내부-파라미터) 참고) |
+| `teleop.launch.py` | 아무데나 | `teleop_twist_keyboard` (⚠️ [동작하지 않음](#5-조종)) |
 
 ### `orb_slam3_ros2` (PC 전용)
 ORB-SLAM3 단안 래퍼.
@@ -161,6 +187,10 @@ source install/setup.bash
 `--symlink-install` 을 쓰면 Python 파일과 config YAML을 고쳐도 재빌드가 필요 없다.
 (`setup.py` / `package.xml` / 런치 파일을 바꿨을 때는 다시 빌드해야 한다.)
 `third_party/` 는 `COLCON_IGNORE` 로 colcon 대상에서 빠져 있다.
+
+> 패키지 폴더를 옮긴 뒤(예: `src/` 재구조화)에는 `build/` · `install/` 에 남은
+> symlink 가 예전 소스 경로를 가리킨다. 한 번 지우고 다시 빌드한다:
+> `rm -rf build install log && colcon build --symlink-install`
 
 ### 의존 패키지
 
@@ -280,7 +310,7 @@ MPU6050(특히 저가 GY-521 클론)은 가속도 감도 오차가 10%를 넘는
 평평하고 단단한 책상 위에서:
 
 ```bash
-python3 src/mpu6050_driver/scripts/calibrate_accel.py
+python3 src/sensors/mpu6050_driver/scripts/calibrate_accel.py
 ```
 
 6개 자세(X위/X아래/Y위/Y아래/Z위/Z아래)를 안내대로 잡아주면 축별 bias와 scale을 푼다:
@@ -290,7 +320,7 @@ bias  = (r_up + r_dn) / 2
 scale = 2g / (r_up - r_dn)
 ```
 
-결과는 `src/mpu6050_driver/config/imu_calibration.yaml` 에 저장되고,
+결과는 `src/sensors/mpu6050_driver/config/imu_calibration.yaml` 에 저장되고,
 다음 `mpu6050_node` 기동 때 자동으로 적용된다. 로그에 이렇게 뜨면 정상이다:
 
 ```
@@ -310,8 +340,8 @@ scale = 2g / (r_up - r_dn)
 카메라마다 따로 잡아야 한다. `camera:=` 로 고른다 (기본값 `csi`).
 
 ```bash
-ros2 launch intrinsic_calibration.launch.py                # CSI (imx219)
-ros2 launch intrinsic_calibration.launch.py camera:=usb    # USB 웹캠 (C270)
+ros2 launch rc_car_bringup intrinsic_calibration.launch.py                # CSI (imx219)
+ros2 launch rc_car_bringup intrinsic_calibration.launch.py camera:=usb    # USB 웹캠 (C270)
 ```
 
 7×5 체커보드(사각형 25 mm) 기준. 결과는 `~/.ros/camera_info/` 에 저장되며,

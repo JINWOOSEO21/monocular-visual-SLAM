@@ -4,7 +4,7 @@
 #   a_raw 는 ±2g 공칭 스케일(16384 LSB/g)로 변환한 m/s^2 값.
 #
 # 아래는 "보정 없음" 기본값이다. 실제 값을 채우려면:
-#   python3 src/mpu6050_driver/scripts/calibrate_accel.py
+#   python3 src/sensors/mpu6050_driver/scripts/calibrate_accel.py
 # 를 실행하면 이 파일이 측정 결과로 덮어써진다.
 #
 # 참고: MPU6050 (특히 저가 GY-521 클론)은 가속도 감도 오차가 10% 이상

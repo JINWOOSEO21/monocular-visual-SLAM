@@ -6,7 +6,7 @@ project(orb_slam3_ros2)
 # scripts/build_third_party.sh 로 빌드한다 (PC 전용).
 # 다른 위치에 빌드했다면 환경변수로 덮어쓴다:
 #   ORB_SLAM3_ROOT=/path/to/ORB_SLAM3  PANGOLIN_PREFIX=/path/to/install  colcon build
-get_filename_component(THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party" ABSOLUTE)
+get_filename_component(THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party" ABSOLUTE)
 if(DEFINED ENV{ORB_SLAM3_ROOT})
   set(ORB_SLAM3_ROOT "$ENV{ORB_SLAM3_ROOT}")
 else()
