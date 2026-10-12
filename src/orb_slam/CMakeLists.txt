@@ -62,7 +62,9 @@ find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 find_package(Pangolin REQUIRED PATHS "${PANGOLIN_PREFIX}/lib/cmake/Pangolin" NO_DEFAULT_PATH)
 
 add_executable(mono_node src/mono_node.cpp)
-target_include_directories(mono_node PRIVATE
+# SYSTEM: third_party 헤더(특히 번들 g2o 가 쓰는 deprecated Eigen::AlignedBit)에서 나는
+# 경고를 끈다. mono_node.cpp 자체의 경고는 그대로 보인다.
+target_include_directories(mono_node SYSTEM PRIVATE
   "${ORB_SLAM3_ROOT}"
   "${ORB_SLAM3_ROOT}/include"
   "${ORB_SLAM3_ROOT}/include/CameraModels"
