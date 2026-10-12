@@ -359,7 +359,11 @@ void Map::SetLastMapChange(int currentChangeId)
 void Map::PreSave(std::set<GeometricCamera*> &spCams)
 {
     int nMPWithoutObs = 0;
-    for(MapPoint* pMPi : mspMapPoints)
+    // rc_car patch: iterate over a copy. EraseObservation() calls SetBadFlag() once a
+    // point drops to 2 observations, and that erases it from mspMapPoints while the
+    // range-for still walks the set -> SIGSEGV in _Rb_tree_increment on atlas save.
+    const set<MapPoint*> spMPs = mspMapPoints;
+    for(MapPoint* pMPi : spMPs)
     {
         if(!pMPi || pMPi->isBad())
             continue;
@@ -390,13 +394,17 @@ void Map::PreSave(std::set<GeometricCamera*> &spCams)
 
     // Backup of MapPoints
     mvpBackupMapPoints.clear();
-    for(MapPoint* pMPi : mspMapPoints)
+    // rc_car patch: MapPoint::PreSave() can also mark the point bad and erase it from
+    // mspMapPoints, so walk a copy and keep only the points that are still good.
+    const set<MapPoint*> spMPsToSave = mspMapPoints;
+    for(MapPoint* pMPi : spMPsToSave)
     {
         if(!pMPi || pMPi->isBad())
             continue;
 
-        mvpBackupMapPoints.push_back(pMPi);
         pMPi->PreSave(mspKeyFrames,mspMapPoints);
+        if(!pMPi->isBad())
+            mvpBackupMapPoints.push_back(pMPi);
     }
 
     // Backup of KeyFrames

@@ -1,4 +1,1 @@
-build
-CMakeLists.txt.user
-*.pyc
-.vscode/settings.json
+/build/

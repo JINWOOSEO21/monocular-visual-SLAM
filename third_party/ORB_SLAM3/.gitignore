@@ -1,93 +1,22 @@
-# Ignore all
-*
+# 빌드 산출물 (scripts/build_third_party.sh)
+/build/
+/lib/
+/Thirdparty/DBoW2/build/
+/Thirdparty/DBoW2/lib/
+/Thirdparty/g2o/build/
+/Thirdparty/g2o/lib/
+/Thirdparty/g2o/config.h
+/Thirdparty/Sophus/build/
 
-# Unignore all with extensions
-!*.*
+# 압축 해제한 vocabulary (원본은 Vocabulary/ORBvoc.txt.tar.gz)
+/Vocabulary/ORBvoc.txt
 
-# Unignore all dirs
-!*/
+# 예제 실행 파일 — Examples*/ 에는 CMakeLists 가 빌드하는 .cc 만 둔다
+/Examples*/**
+!/Examples*/**/
+!/Examples*/**/*.cc
 
-CMakeLists.txt.user
-CMakeLists_modified.txt
-
-Examples/RGB-D/rgbd_tum
-Examples/RGB-D/rgbd_realsense_D435i
-
-Examples/RGB-D-Inertial/rgbd_inertial_realsense_D435i
-
-Examples/Monocular/mono_realsense_D435i
-Examples/Monocular/mono_euroc
-Examples/Monocular/mono_kitti
-Examples/Monocular/mono_tum
-Examples/Monocular/mono_tum_vi
-Examples/Monocular/mono_realsense_t265
-
-Examples/Stereo/stereo_euroc
-Examples/Stereo/stereo_kitti
-Examples/Stereo/stereo_tum_vi
-Examples/Stereo/stereo_realsense_t265
-Examples/Stereo/stereo_realsense_D435i
-
-Examples/Monocular-Inertial/mono_inertial_euroc
-Examples/Monocular-Inertial/mono_inertial_tum_vi
-Examples/Monocular-Inertial/mono_inertial_realsense_t265
-Examples/Monocular-Inertial/mono_inertial_realsense_D435i
-Examples/Monocular-Inertial/mono_inertial_realsense_D435i_2
-
-Examples/Stereo-Inertial/stereo_inertial_euroc
-Examples/Stereo-Inertial/stereo_inertial_tum_vi
-Examples/Stereo-Inertial/stereo_inertial_realsense_t265
-Examples/Stereo-Inertial/stereo_inertial_realsense_D435i
-
-
-Examples/ROS/ORB_SLAM3/Mono
-Examples/ROS/ORB_SLAM3/Mono_Inertial
-Examples/ROS/ORB_SLAM3/MonoAR
-Examples/ROS/ORB_SLAM3/RGBD
-Examples/ROS/ORB_SLAM3/Stereo
-Examples/ROS/ORB_SLAM3/Stereo_Inertial
-
-Examples/Calibration/recorder_realsense_D435i
-
-Examples/Tests/viewer_dataset
-Examples/Tests/sophus_test
-
-Examples/ROS/ORB_SLAM3/CMakeLists.txt.user
-Examples/ROS/ORB_SLAM3/build/
-
+# 실행 중 생기는 파일
+*.osa
 KeyFrameTrajectory.txt
 CameraTrajectory.txt
-kf_*.txt
-f_*.txt
-Thirdparty/DBoW2/build/
-Thirdparty/DBoW2/lib/
-Thirdparty/g2o/build/
-Thirdparty/g2o/config.h
-Thirdparty/g2o/lib/
-Vocabulary/ORBvoc.txt
-build/
-
-lib/
-
-cmake_modules/
-cmake-build-debug/
-
-ExecMean.txt
-SessionInfo.txt
-Results_Euroc.txt
-LBA_Stats.txt
-LocalMapTimeStats.txt
-TrackLocalMapStats.txt
-TrackingTimeStats.txt
-time*
-Time*
-Table_Euroc
-Table_TUMVI_rooms/
-*.pyc
-*.osa
-.idea/
-my_settings.txt
-
-borrar/*
-
-*/ExecMean.txt
