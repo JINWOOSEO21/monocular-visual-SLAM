@@ -523,37 +523,27 @@ void System::Shutdown()
 
     mpLocalMapper->RequestFinish();
     mpLoopCloser->RequestFinish();
-
-    // rc_car patch: stop the viewer before the atlas is saved. Upstream left this
-    // commented out, so the viewer kept drawing the atlas while SaveAtlas() and
-    // SaveKeyFrameTrajectory*() walked it, and Ctrl-C ended in SIGSEGV or a hang.
-    // The viewer's own "Stop" button calls Shutdown() from the viewer thread, so
-    // only wait when called from another thread, and never wait forever.
-    if(mpViewer && mptViewer && mptViewer->get_id() != std::this_thread::get_id())
+    /*if(mpViewer)
     {
         mpViewer->RequestFinish();
-        for(int i = 0; i < 600 && !mpViewer->isFinished(); ++i)
+        while(!mpViewer->isFinished())
             usleep(5000);
-        if(!mpViewer->isFinished())
-            cout << "Viewer did not finish within 3 s" << endl;
-    }
+    }*/
 
-    // rc_car patch: wait (bounded) for local mapping and loop closing so the
-    // atlas is not saved while they are still changing it. A running global BA
-    // is not waited for, as upstream intended.
-    for(int i = 0; i < 1000; ++i)
+    // Wait until all thread have effectively stopped
+    /*while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
     {
-        if(mpLocalMapper->isFinished() && mpLoopCloser->isFinished())
+        if(!mpLocalMapper->isFinished())
+            cout << "mpLocalMapper is not finished" << endl;*/
+        /*if(!mpLoopCloser->isFinished())
+            cout << "mpLoopCloser is not finished" << endl;
+        if(mpLoopCloser->isRunningGBA()){
+            cout << "mpLoopCloser is running GBA" << endl;
+            cout << "break anyway..." << endl;
             break;
-        if(mpLoopCloser->isRunningGBA())
-        {
-            cout << "mpLoopCloser is running GBA, saving anyway" << endl;
-            break;
-        }
-        usleep(5000);
-    }
-    if(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished())
-        cout << "Local mapping / loop closing did not finish within 5 s" << endl;
+        }*/
+        /*usleep(5000);
+    }*/
 
     if(!mStrSaveAtlasToFile.empty())
     {
@@ -574,11 +564,6 @@ void System::Shutdown()
 bool System::isShutDown() {
     unique_lock<mutex> lock(mMutexReset);
     return mbShutDown;
-}
-
-Map* System::GetCurrentMap()
-{
-    return mpAtlas->GetCurrentMap();
 }
 
 void System::SaveTrajectoryTUM(const string &filename)

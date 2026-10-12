@@ -130,11 +130,6 @@ public:
     // since last call to this function
     bool MapChanged();
 
-    // rc_car patch: the map tracking currently runs in. Changes when tracking is lost
-    // and a new map is created, and when a merge makes an older map current. Use the
-    // pointer, not GetId(): a merge gives the older map the merged map's id.
-    Map* GetCurrentMap();
-
     // Reset the system (clear Atlas or the active map)
     void Reset();
     void ResetActiveMap();
