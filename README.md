@@ -83,7 +83,9 @@ orb-slam/
 │   ├── motor_controller/       # [Pi] open-loop 모터 제어 (둘 중 하나만 실행)
 │   ├── rc_car_bringup/         # [Pi] 센서 스택 · static TF · EKF · 카메라 캘리브레이션
 │   └── orb_slam/               # [PC] ORB-SLAM3 래퍼 + SLAM launch · RViz 설정
-└── third_party/                # ORB_SLAM3, Pangolin 소스 (COLCON_IGNORE)
+└── third_party/                # COLCON_IGNORE
+    ├── ORB_SLAM3/              #   upstream 소스 복사 + 로컬 패치
+    └── Pangolin/               #   git submodule (v0.6)
 ```
 
 Pi 와 PC 는 같은 저장소 · 같은 브랜치를 쓴다. `orb_slam` 은 ORB-SLAM3 라이브러리가
@@ -161,8 +163,30 @@ ORB-SLAM3 단안 래퍼와 SLAM 실행에 필요한 런치 · 설정 전부.
 
 ### PC — third_party (ORB-SLAM3 + Pangolin)
 
-`third_party/` 에는 ORB-SLAM3(UZ-SLAMLab `4452a3c`)와 Pangolin v0.6 소스가 들어 있다.
-ORB-SLAM3 에는 이 프로젝트용 패치가 적용돼 있다:
+| 경로 | 출처 | 형태 |
+|---|---|---|
+| `third_party/ORB_SLAM3` | [UZ-SLAMLab/ORB_SLAM3](https://github.com/UZ-SLAMLab/ORB_SLAM3) `4452a3c` | 소스 복사(vendor) + 로컬 패치 |
+| `third_party/Pangolin` | [stevenlovegrove/Pangolin](https://github.com/stevenlovegrove/Pangolin) `v0.6` | git submodule (수정 없음) |
+
+PC 에서 clone 할 때는 submodule 까지 받는다 (빠뜨려도 빌드 스크립트가 받아 온다).
+Pi 는 Pangolin 이 필요 없으므로 submodule 을 받지 않아도 된다.
+
+```bash
+git clone --recursive git@github.com:JINWOOSEO21/monocular-visual-SLAM.git   # PC
+git submodule update --init third_party/Pangolin                           # 이미 clone 했다면
+```
+
+ORB-SLAM3 는 git 히스토리에 **원본 커밋**(upstream `4452a3c` 그대로, 데이터셋 예제·
+`evaluation/` 제외)과 그 위의 **패치 커밋**이 따로 있다. 무엇을 고쳤는지는 패치 커밋
+하나로 볼 수 있고, 소스 안의 변경 지점에는 `rc_car patch:` 주석이 달려 있다:
+
+```bash
+git log --oneline -- third_party/ORB_SLAM3                  # 원본 / 패치 커밋 확인
+git show <패치 커밋> -- third_party/ORB_SLAM3                 # 변경 내용
+git format-patch -1 <패치 커밋> -- third_party/ORB_SLAM3      # 다른 버전에 다시 적용할 .patch 추출
+```
+
+패치 요약:
 
 - `System::Shutdown()` 이 뷰어를 멈추고 매핑/루프 스레드를 기다린 뒤 Atlas 를 저장
   (원본은 Ctrl-C 시 segfault/hang)

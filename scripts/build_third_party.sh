@@ -29,6 +29,13 @@ configure() {  # configure <src dir> [cmake args...]
     -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF -DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON "$@"
 }
 
+# Pangolin 은 git submodule(v0.6)이다. clone 할 때 --recursive 를 빠뜨렸으면 여기서 받는다.
+# Pangolin 자신의 하위 submodule(pybind11)은 BUILD_PANGOLIN_PYTHON=OFF 라 필요 없다.
+if [ ! -f "$TP/Pangolin/CMakeLists.txt" ]; then
+  echo "==> third_party/Pangolin submodule 초기화"
+  git -C "$ROOT" submodule update --init third_party/Pangolin
+fi
+
 configure "$TP/Pangolin" -DCMAKE_INSTALL_PREFIX="$PREFIX" \
   -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=OFF -DBUILD_TOOLS=OFF -DBUILD_PANGOLIN_PYTHON=OFF \
   -DBUILD_PANGOLIN_FFMPEG=OFF
