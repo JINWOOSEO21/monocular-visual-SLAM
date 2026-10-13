@@ -3,7 +3,7 @@
 
 입력 (둘 다 같은 맵, orb_world 프레임, 스케일 없는 ORB 단위)
     --trajectory  키프레임 궤적, TUM 형식: t tx ty tz qx qy qz qw  (T_world_cam)
-    --points      맵 포인트, ASCII PLY: x y z [observations]
+    --points      맵 포인트, ASCII PLY: x y z [observations] [t_first]
     --events      (선택) 그 실행의 launch.log. mono_node 가 남긴 새 맵 / 맵 병합 / 루프 클로저
                   시각을 읽어 그림에 표시한다. launch.log 의 줄 앞 시각(벽시계)을 쓰므로
                   실시간 실행 기준이다 (rosbag 재생이면 시각이 맞지 않는다).
@@ -28,6 +28,13 @@ orb_world 는 맵을 시작한 키프레임의 카메라 광학 프레임(x 오�
 
 수평 정렬 후 좌표는 첫 키프레임의 로봇 기준 x 전방, y 왼쪽, z 위이고, --scale 을 주면
 (scale_aligner 가 출력한 "1 ORB 단위 = s m") 미터가 된다.
+
+애니메이션과 3D 뷰어는 맵 포인트를 처음 관측된 시각에 하나씩 나타나게 해서 지도가 쌓여
+가는 모습을 보여 준다 (--static-points 면 처음부터 다 보인다). 그 시각은
+    t_first 가 PLY 에 있으면   mono_node 가 기록한 값 (그 점을 관측한 가장 이른 키프레임 시각)
+    없으면 (예전 PLY)         추정값: 점이 키프레임 카메라 시야 안(--settings 의 내부 파라미터)에
+                              처음 들어온 시각. 가림은 따지지 않고, 그 점이 보인 가장 가까운
+                              거리의 --reveal-range 배보다 멀면 안 보인 것으로 친다.
 
     ros2 run orb_slam plot_map --scale 2.39
     ros2 run orb_slam plot_map --level mount --pitch-deg 20 --out map.png
@@ -137,10 +144,73 @@ def elevation_deg(up):
     return math.degrees(math.atan2(up[2], -up[1]))
 
 
+def rotations(quats):
+    """쿼터니언 [qx qy qz qw] 들을 회전 행렬 Nx3x3 로."""
+    x, y, z, w = quats.T
+    return np.stack([
+        np.column_stack([1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)]),
+        np.column_stack([2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)]),
+        np.column_stack([2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]),
+    ], axis=1)
+
+
 def optical_axis(quats):
     """T_world_cam 쿼터니언들에서 카메라 광축(카메라 z)의 월드 방향."""
-    x, y, z, w = quats.T
-    return np.column_stack([2 * (x * z + y * w), 2 * (y * z - x * w), 1 - 2 * (x * x + y * y)])
+    return rotations(quats)[:, :, 2]
+
+
+# ── 맵 포인트가 처음 보인 시각 ─────────────────────────────────────
+def default_settings():
+    """orb_slam 패키지의 카메라 설정 yaml (설치본, 없으면 소스 트리)."""
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        return Path(get_package_share_directory("orb_slam")) / "config" / "imx219_820x616.yaml"
+    except Exception:
+        return Path(__file__).resolve().parent.parent / "config" / "imx219_820x616.yaml"
+
+
+def load_intrinsics(path):
+    """ORB-SLAM3 설정 yaml 에서 (fx, fy, cx, cy, width, height). OpenCV yaml 이라 줄 단위로 읽는다."""
+    want = {"Camera1.fx": "fx", "Camera1.fy": "fy", "Camera1.cx": "cx", "Camera1.cy": "cy",
+            "Camera.width": "w", "Camera.height": "h"}
+    got = {}
+    for line in Path(path).expanduser().read_text().splitlines():
+        key, _, val = line.partition(":")
+        if key.strip() in want:
+            got[want[key.strip()]] = float(val.split("#")[0])
+    missing = set(want.values()) - set(got)
+    if missing:
+        raise SystemExit(f"{path} 에 카메라 파라미터가 없다: {sorted(missing)}")
+    return got
+
+
+def estimate_first_seen(pts, stamps, traj, quats, intr, reveal_range):
+    """각 점이 키프레임 카메라 시야에 처음 들어온 시각 (stamps 와 같은 시간축).
+
+    시야 = 카메라 앞, 이미지 안, 거리 <= reveal_range x (그 점이 보인 가장 가까운 거리).
+    ORB 특징은 스케일 피라미드 범위 안에서만 다시 잡히므로 멀리서 시야에 걸쳤을 뿐인 점을
+    너무 일찍 나타나게 하지 않으려는 것이다. 어느 키프레임에서도 시야에 없으면 가장 가까운
+    키프레임의 시각을 쓴다.
+    """
+    rots = rotations(quats)
+    n = len(pts)
+    first = np.full(n, -1)
+    dist = np.empty((len(traj), n))
+    vis = np.zeros((len(traj), n), dtype=bool)
+    for k, (t, r) in enumerate(zip(traj, rots)):
+        pc = (pts - t) @ r  # 카메라 프레임: R^T (p - t)
+        z = pc[:, 2]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            u = intr["fx"] * pc[:, 0] / z + intr["cx"]
+            v = intr["fy"] * pc[:, 1] / z + intr["cy"]
+        vis[k] = (z > 1e-6) & (u >= 0) & (u < intr["w"]) & (v >= 0) & (v < intr["h"])
+        dist[k] = np.linalg.norm(pc, axis=1)
+    nearest_seen = np.where(vis, dist, np.inf).min(axis=0)
+    ok = vis & (dist <= reveal_range * nearest_seen)
+    seen = ok.any(axis=0)
+    first[seen] = ok[:, seen].argmax(axis=0)
+    first[~seen] = dist[:, ~seen].argmin(axis=0)
+    return stamps[first], int((~seen).sum())
 
 
 # ── 실행 데이터 정리 ──────────────────────────────────────────────
@@ -179,6 +249,8 @@ class Run:
 
         self.pts = np.empty((0, 3))
         self.obs = np.empty(0)
+        self.t_seen = np.empty(0)  # 점이 처음 관측된 시각 (첫 키프레임 기준 초)
+        self.seen_source = None    # "recorded" | "estimated"
         self.n_points_file = 0
         if Path(args.points).is_file():
             ply = load_ply(args.points)
@@ -189,6 +261,21 @@ class Run:
             self.pts = (pts[keep] - origin) @ axes.T * args.scale
             self.obs = obs[keep]
             print(f"맵 포인트 {len(pts)} 개 중 관측 {args.min_obs} 회 이상 {len(self.pts)} 개")
+            if "t_first" in ply:
+                t_first = ply["t_first"][keep]
+                self.t_seen = np.where(np.isfinite(t_first), t_first - stamps[0], self.t[-1])
+                self.seen_source = "recorded"
+                print("맵 포인트가 나타나는 시각: PLY 의 t_first (mono_node 기록)")
+            elif len(self.pts):
+                intr = load_intrinsics(args.settings or default_settings())
+                t_first, unseen = estimate_first_seen(
+                    pts[keep], stamps, traj, quats, intr, args.reveal_range)
+                self.t_seen = t_first - stamps[0]
+                self.seen_source = "estimated"
+                print("맵 포인트가 나타나는 시각: 키프레임 시야로 추정 (PLY 에 t_first 없음)"
+                      + (f", 시야에 한 번도 안 든 점 {unseen} 개는 가장 가까운 키프레임 시각"
+                         if unseen else ""))
+            self.t_seen = np.clip(self.t_seen, 0.0, self.t[-1])
         else:
             print(f"맵 포인트 파일이 없어 궤적만 그린다: {args.points}")
 
@@ -229,9 +316,12 @@ class Run:
             margin = 0.35 * float(max(hi - lo))
         return lo - margin, hi + margin
 
+    def in_box(self, lo, hi):
+        """맵 포인트 중 위에서 본 범위 안에 있는 것의 마스크."""
+        return np.all((self.pts[:, :2] >= lo) & (self.pts[:, :2] <= hi), axis=1)
+
     def points_in(self, lo, hi):
-        m = np.all((self.pts[:, :2] >= lo) & (self.pts[:, :2] <= hi), axis=1)
-        return self.pts[m]
+        return self.pts[self.in_box(lo, hi)]
 
     def stats_line(self):
         scale = f"{'≈' if self.scale_approx else ''}{self.scale:g} m per ORB unit"
@@ -326,7 +416,10 @@ def plot_static(run, out, zrange=None):
 
 
 # ── 애니메이션 ────────────────────────────────────────────────────
-def animate(run, out, speed, fps):
+FRESH_COLOR = "#f28e2b"  # 방금 관측된 맵 포인트
+
+
+def animate(run, out, speed, fps, reveal=True):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -334,8 +427,20 @@ def animate(run, out, speed, fps):
 
     lo, hi = run.view_box()
     fig, ax = plt.subplots(figsize=(8, 7), constrained_layout=True)
-    pts = run.points_in(lo, hi)
-    if len(pts):
+    box = run.in_box(lo, hi)
+    pts = run.pts[box]
+    reveal = reveal and run.seen_source is not None and len(pts) > 0
+    if reveal:
+        # 처음 관측된 순서로 정렬해 두면 시각 tf 까지 보인 점은 앞쪽 n 개다
+        order = np.argsort(run.t_seen[box], kind="stable")
+        pts, t_seen = pts[order], run.t_seen[box][order]
+        zlo, zhi = _height_limits(pts[:, 2])
+        seen_sc = ax.scatter(np.empty(0), np.empty(0), c=np.empty(0), s=1.4, cmap="viridis",
+                             vmin=zlo, vmax=zhi, alpha=0.55, linewidths=0)
+        fresh_sc = ax.scatter(np.empty(0), np.empty(0), s=4, c=FRESH_COLOR, alpha=0.9,
+                              linewidths=0, zorder=2)
+        fresh_window = 0.75 * speed  # 재생 시간으로 0.75 초 동안 '방금 관측' 색으로 둔다
+    elif len(pts):
         zlo, zhi = _height_limits(pts[:, 2])
         order = np.argsort(pts[:, 2])
         ax.scatter(pts[order, 0], pts[order, 1], c=pts[order, 2], s=1.2, cmap="viridis",
@@ -365,7 +470,12 @@ def animate(run, out, speed, fps):
     ax.grid(True, lw=0.3, alpha=0.6)
     ax.set_xlabel(f"x forward [{run.unit}]")
     ax.set_ylabel(f"y left [{run.unit}]")
-    ax.set_title(f"{run.name} — ORB-SLAM3 keyframe trajectory ({speed:g}x)")
+    ax.set_title(f"{run.name} — ORB-SLAM3 {'map building' if reveal else 'keyframe trajectory'}"
+                 f" ({speed:g}x)")
+    if reveal:
+        ax.plot([], [], "o", c=FRESH_COLOR, ms=4, label="just observed")
+        ax.plot([], [], "o", c=plt.get_cmap("viridis")(0.6), ms=4, label="map points (by height)")
+        ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
 
     duration = float(run.t[-1])
     n_frames = int(duration / speed * fps) + 1
@@ -379,7 +489,16 @@ def animate(run, out, speed, fps):
         head.set_data([run.xyz[k, 0]], [run.xyz[k, 1]])
         quiv.set_offsets([[run.xyz[k, 0], run.xyz[k, 1]]])
         quiv.set_UVC([np.cos(run.yaw[k]) * arrow_len], [np.sin(run.yaw[k]) * arrow_len])
-        clock.set_text(f"t = {tf:6.1f} s   {np.linalg.norm(np.diff(run.xyz[: k + 1], axis=0), axis=1).sum():5.1f} {run.unit}")
+        dist = np.linalg.norm(np.diff(run.xyz[: k + 1], axis=0), axis=1).sum()
+        clock_text = f"t = {tf:6.1f} s   {dist:5.1f} {run.unit}"
+        if reveal:
+            n = int(np.searchsorted(t_seen, tf, side="right"))
+            m = int(np.searchsorted(t_seen, tf - fresh_window, side="right"))
+            seen_sc.set_offsets(pts[:m, :2])
+            seen_sc.set_array(pts[:m, 2])
+            fresh_sc.set_offsets(pts[m:n, :2] if n > m else np.empty((0, 2)))
+            clock_text += f"\n{n:5d} map points"
+        clock.set_text(clock_text)
         text, color = "", None
         for (t, kind, _k), artist in zip(run.events, event_artists):
             artist.set_visible(t <= tf)
@@ -402,10 +521,17 @@ def export_html(run, out):
     lo, hi = run.view_box(margin=None)
     # 3D 에서는 궤적 주변을 조금 더 넓게 남기되, 멀리 튄 점은 뺀다
     span = float(max(hi - lo))
-    pts = run.points_in(lo - 0.3 * span, hi + 0.3 * span)
-    if len(pts):
-        zlo, zhi = np.percentile(pts[:, 2], [0.5, 99.5])
-        pts = pts[(pts[:, 2] >= zlo) & (pts[:, 2] <= zhi)]
+    keep = run.in_box(lo - 0.3 * span, hi + 0.3 * span)
+    if keep.any():
+        zlo, zhi = np.percentile(run.pts[keep, 2], [0.5, 99.5])
+        keep &= (run.pts[:, 2] >= zlo) & (run.pts[:, 2] <= zhi)
+    pts = run.pts[keep]
+    if run.seen_source is not None:
+        t_seen = run.t_seen[keep]
+        order = np.argsort(t_seen, kind="stable")  # 뷰어가 앞쪽 n 개만 잘라 쓴다
+        pts, t_seen = pts[order], t_seen[order]
+    else:
+        t_seen = np.zeros(len(pts))
     data = {
         "name": run.name,
         "unit": run.unit,
@@ -417,7 +543,9 @@ def export_html(run, out):
         "nPointsFile": run.n_points_file,
         "traj": [[round(float(t), 2), *map(lambda v: round(float(v), 3), p), round(float(y), 3)]
                  for t, p, y in zip(run.t, run.xyz, run.yaw)],
-        "points": [[round(float(v), 3) for v in p] for p in pts],
+        "points": [[*(round(float(v), 3) for v in p), round(float(t), 2)]
+                   for p, t in zip(pts, t_seen)],
+        "seenSource": run.seen_source,
         "events": [{"t": round(t, 1), "kind": kind, "k": k} for t, kind, k in run.events],
     }
     blob = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
@@ -435,6 +563,7 @@ HTML_TEMPLATE = r"""<title>__TITLE__</title>
 :root {
   --bg: #eef2f4; --panel: #ffffff; --ink: #14202a; --muted: #566573; --line: #d3dbe1;
   --accent: #c2364a; --merge: #b7791f; --loop: #5b3f8c; --pt-low: #b9c7d1; --pt-high: #1f5d75;
+  --fresh: #e8731a;
   --font-body: "IBM Plex Sans KR", "Noto Sans KR", "Apple SD Gothic Neo", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 }
@@ -442,12 +571,14 @@ HTML_TEMPLATE = r"""<title>__TITLE__</title>
   :root:not([data-theme="light"]) {
     --bg: #0d1418; --panel: #141d23; --ink: #e3e9ed; --muted: #95a3ae; --line: #25323b;
     --accent: #ff6b7d; --merge: #f0b549; --loop: #b394f0; --pt-low: #34495a; --pt-high: #8fdcf2;
+  --fresh: #ffa24c;
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --bg: #0d1418; --panel: #141d23; --ink: #e3e9ed; --muted: #95a3ae; --line: #25323b;
   --accent: #ff6b7d; --merge: #f0b549; --loop: #b394f0; --pt-low: #34495a; --pt-high: #8fdcf2;
+  --fresh: #ffa24c;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -501,6 +632,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
     <div class="viewer-bar">
       <label><input type="checkbox" id="show-points" checked> <span class="swatch" id="sw-points"></span> 맵 포인트</label>
       <label><input type="checkbox" id="show-traj" checked> <span class="swatch" id="sw-traj"></span> 키프레임 궤적</label>
+      <label id="reveal-wrap"><input type="checkbox" id="reveal" checked> <span class="swatch" id="sw-fresh"></span> 관측된 점만 쌓기</label>
       <span class="hint">드래그: 회전 · 휠: 확대 · 우클릭 드래그: 이동</span>
     </div>
     <div id="plot"></div>
@@ -548,9 +680,13 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
     "좌표는 첫 키프레임의 차 위치를 원점으로, x 전방 · y 왼쪽 · z 위입니다. 카메라가 위로 기울어 있어 궤적에 평면을 맞춰 바닥을 수평으로 돌렸습니다.",
     D.scaleApprox ? "스케일은 이 실행의 확정값이 로그에 남지 않아 이전 주행들의 값으로 근사했습니다. 거리에 몇 % 오차가 있을 수 있습니다." : "스케일은 scale_aligner 가 휠 오도메트리로 확정한 값입니다.",
     "맵 포인트는 키프레임 여러 장에서 삼각측량된 ORB 특징점입니다. 색은 높이를 나타내며, 궤적에서 멀리 떨어진 점은 뺐습니다.",
+    D.seenSource === "recorded" ? "‘관측된 점만 쌓기’를 켜면 각 점이 처음 관측된 시각(mono_node 가 기록한 키프레임 시각)에 나타나고, 방금 관측된 점은 주황색으로 잠깐 강조됩니다. 점의 위치는 최종 최적화된 지도 기준입니다."
+      : D.seenSource === "estimated" ? "‘관측된 점만 쌓기’를 켜면 각 점이 키프레임 카메라 시야에 처음 들어온 시각에 나타나고, 방금 관측된 점은 주황색으로 잠깐 강조됩니다. 이 실행은 관측 시각이 기록되기 전이라 카메라 포즈와 내부 파라미터로 추정한 시각입니다 (가림은 고려하지 않음)."
+      : "",
     `생성: <code>ros2 run orb_slam plot_map --html</code>`,
   ];
-  document.getElementById("notes").innerHTML = notes.map((n) => `<p>${n}</p>`).join("");
+  document.getElementById("notes").innerHTML = notes.filter(Boolean).map((n) => `<p>${n}</p>`).join("");
+  if (!D.seenSource) document.getElementById("reveal-wrap").hidden = true;
 
   // 타임라인
   const slider = document.getElementById("time");
@@ -579,27 +715,45 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
   function colors() {
     return { bg: css("--panel"), ink: css("--ink"), muted: css("--muted"), line: css("--line"),
       accent: css("--accent"), low: css("--pt-low"), high: css("--pt-high"),
-      merge: css("--merge"), loop: css("--loop") };
+      merge: css("--merge"), loop: css("--loop"), fresh: css("--fresh") };
   }
 
   function paintChrome() {
     const c = colors();
     document.getElementById("sw-points").style.background = `linear-gradient(90deg, ${c.low}, ${c.high})`;
     document.getElementById("sw-traj").style.background = c.accent;
+    document.getElementById("sw-fresh").style.background = c.fresh;
     ticks.querySelectorAll("span").forEach((s) => { s.style.background = css(COLOR_VAR[s.dataset.kind]); });
     evBox.querySelectorAll("button").forEach((b) => { b.querySelector(".dot").style.background = css(COLOR_VAR[b.dataset.kind]); });
   }
 
-  const P = D.points;
+  const P = D.points;  // [x, y, z, 처음 관측된 시각] — 시각 순으로 정렬돼 있다
   const col = (rows, i) => rows.map((r) => r[i]);
+  const zs = col(P, 2);
+  const zMin = Math.min(...zs), zMax = Math.max(...zs);
+  const FRESH = D.duration / 20 * 0.75;  // 재생 0.75 초 동안 '방금 관측' 으로 강조
+  // 시각 t 까지 관측된 점의 개수 (P 가 시각 순이라 이분 탐색)
+  function seenCount(t) {
+    let lo = 0, hi = P.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (P[mid][3] <= t) lo = mid + 1; else hi = mid; }
+    return lo;
+  }
+  const revealOn = () => Boolean(D.seenSource) && document.getElementById("reveal").checked;
   function traces(k) {
     const c = colors();
     const upto = T.slice(0, k + 1);
     const ev = D.events.filter((e) => e.k <= k);
+    const showPts = document.getElementById("show-points").checked;
+    const n = revealOn() ? seenCount(T[k][0]) : P.length;
+    const m = revealOn() && k < N - 1 ? seenCount(T[k][0] - FRESH) : n;
+    const old = P.slice(0, m), fresh = P.slice(m, n);
     return [
-      { type: "scatter3d", mode: "markers", x: col(P, 0), y: col(P, 1), z: col(P, 2), hoverinfo: "skip",
-        marker: { size: 1.2, color: col(P, 2), colorscale: [[0, c.low], [1, c.high]], opacity: 0.6 },
-        visible: document.getElementById("show-points").checked },
+      { type: "scatter3d", mode: "markers", x: col(old, 0), y: col(old, 1), z: col(old, 2), hoverinfo: "skip",
+        marker: { size: 1.2, color: col(old, 2), cmin: zMin, cmax: zMax,
+          colorscale: [[0, c.low], [1, c.high]], opacity: 0.6 },
+        visible: showPts },
+      { type: "scatter3d", mode: "markers", x: col(fresh, 0), y: col(fresh, 1), z: col(fresh, 2),
+        hoverinfo: "skip", marker: { size: 1.8, color: c.fresh, opacity: 0.9 }, visible: showPts },
       { type: "scatter3d", mode: "lines", x: col(upto, 1), y: col(upto, 2), z: col(upto, 3),
         line: { color: c.accent, width: 5 }, hoverinfo: "skip",
         visible: document.getElementById("show-traj").checked },
@@ -634,7 +788,8 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
     frame = Math.max(0, Math.min(N - 1, k | 0));
     slider.value = String(frame);
     const dist = T.slice(1, frame + 1).reduce((s, r, i) => s + Math.hypot(r[1] - T[i][1], r[2] - T[i][2], r[3] - T[i][3]), 0);
-    clock.textContent = `t = ${fmt(T[frame][0])} / ${fmt(D.duration)} s · ${fmt(dist)} ${U}`;
+    const nPts = revealOn() ? seenCount(T[frame][0]) : P.length;
+    clock.textContent = `t = ${fmt(T[frame][0])} / ${fmt(D.duration)} s · ${fmt(dist)} ${U} · 점 ${nPts.toLocaleString("ko-KR")}`;
     if (hasPlotly) Plotly.react(plotEl, traces(frame), layout(), { responsive: true, displaylogo: false });
   }
 
@@ -658,7 +813,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
     timer = requestAnimationFrame(step);
   });
   slider.addEventListener("input", () => { stop(); setFrame(Number(slider.value)); });
-  ["show-points", "show-traj"].forEach((id) =>
+  ["show-points", "show-traj", "reveal"].forEach((id) =>
     document.getElementById(id).addEventListener("change", () => setFrame(frame)));
 
   function retheme() { paintChrome(); setFrame(frame); }
@@ -698,6 +853,12 @@ def main():
     ap.add_argument("--speed", type=float, default=20.0, help="애니메이션 재생 배속")
     ap.add_argument("--fps", type=int, default=12, help="애니메이션 초당 프레임")
     ap.add_argument("--html", help="3D 뷰어 HTML 저장 경로")
+    ap.add_argument("--static-points", action="store_true",
+                    help="애니메이션에서 맵 포인트를 처음부터 다 보인다 (관측 시각대로 쌓지 않는다)")
+    ap.add_argument("--settings",
+                    help="관측 시각 추정에 쓸 ORB-SLAM3 설정 yaml (기본: orb_slam 의 imx219_820x616.yaml)")
+    ap.add_argument("--reveal-range", type=float, default=3.0,
+                    help="관측 시각 추정: 점이 보인 가장 가까운 거리의 이 배수까지만 보인 것으로 친다")
     args = ap.parse_args()
 
     run = Run(args)
@@ -705,7 +866,7 @@ def main():
     if args.out or not (args.animate or args.html):
         plot_static(run, args.out, args.zrange)
     if args.animate:
-        animate(run, args.animate, args.speed, args.fps)
+        animate(run, args.animate, args.speed, args.fps, reveal=not args.static_points)
     if args.html:
         export_html(run, args.html)
 

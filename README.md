@@ -275,7 +275,7 @@ rosbag 으로 재현할 때는 `use_sim_time:=true` + `ros2 bag play <bag> --clo
 | `atlas_path` | `~/.ros/orbslam3/atlas` | Atlas 저장/불러오기 경로 |
 | `use_viewer` | `false` | ORB-SLAM3 자체 Pangolin 뷰어 |
 | `trajectory_path` | `~/.ros/orbslam3/kf_trajectory.txt` | 종료 시 키프레임 궤적(TUM) |
-| `map_points_path` | `~/.ros/orbslam3/map_points.ply` | 종료 시 맵 포인트(ASCII PLY: `x y z observations`) |
+| `map_points_path` | `~/.ros/orbslam3/map_points.ply` | 종료 시 맵 포인트(ASCII PLY: `x y z observations t_first`) |
 
 ```bash
 ros2 launch orb_slam slam.launch.py rviz:=false          # 뷰어 없이 (헤드리스)
@@ -333,6 +333,13 @@ ros2 run orb_slam plot_map --scale 2.6 --name test_1820 \
 덮어쓰므로, 남길 실행은 파일을 따로 복사해 두고 `--trajectory` / `--points` 로 넘긴다.
 저장된 궤적은 루프 클로저까지 끝난 최종 지도라 애니메이션은 최종 지도 위의 재생이다
 (주행 중 드리프트가 보정되는 모습은 rosbag 으로 `/orb_slam3/odometry` 를 남겨야 보인다).
+
+애니메이션과 3D 뷰어는 맵 포인트를 **처음 관측된 시각**에 하나씩 나타나게 해서 지도가
+쌓여 가는 모습을 보여 주고, 방금 관측된 점은 주황색으로 잠깐 강조한다. 그 시각은
+`map_points.ply` 의 `t_first`(그 점을 관측한 가장 이른 키프레임의 타임스탬프, 궤적 파일과 같은
+시간축)를 쓴다. `t_first` 가 없는 예전 PLY 는 키프레임 포즈와 카메라 내부 파라미터로 점이
+시야에 처음 들어온 시각을 추정한다 (가림은 고려하지 않는다). 처음부터 모든 점을 보이려면
+`--static-points`, 뷰어에서는 "관측된 점만 쌓기" 체크를 끈다.
 
 카메라가 기울어 있으면 궤적도 기울어 보이므로 바닥을 수평으로 돌려서 그린다. 기본
 `--level pca` 는 궤적에 평면을 맞추는 방식이라 장착 각도를 몰라도 된다. 출력되는

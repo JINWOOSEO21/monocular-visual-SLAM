@@ -12,18 +12,21 @@
 //        /orb_slam3/map_points    sensor_msgs/PointCloud2, frame "orb_world", 스케일 없음
 // 서비스 ~/save_map               std_srvs/Trigger — ORB-SLAM3 를 종료하면서 Atlas 저장
 // 종료 시 trajectory_path      현재 맵의 키프레임 궤적 (TUM)
-//         map_points_path      현재 맵의 맵 포인트 (ASCII PLY: x y z observations)
+//         map_points_path      현재 맵의 맵 포인트 (ASCII PLY: x y z observations t_first)
 //
 // 스케일과 map 프레임 정렬은 scale_aligner 가 맡는다. 이 노드는 ORB-SLAM3 가 내놓는
 // 값을 그대로 옮기기만 한다.
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -377,7 +380,7 @@ private:
     // 맵을 bad 로 만드는데(Atlas::PreSave), 그 맵이 현재 맵이면 이후 GetCurrentMap() 이
     // bad 가 풀리기를 영원히 기다린다 (2026-10-13 실측: 추적을 잃고 막 새 맵을 만든 상태에서
     // 종료하면 이 자리에서 멈춰 SIGKILL 로 끝났다).
-    std::vector<std::pair<Eigen::Vector3f, int>> points;
+    std::vector<SavedPoint> points;
     if (!map_points_path_.empty()) {
       points = collect_map_points();
     }
@@ -393,21 +396,36 @@ private:
   }
 
   // 현재 맵(키프레임 궤적과 같은 맵)의 맵 포인트. observations 는 그 점을 관측한 키프레임
-  // 수로, 시각화에서 신뢰도 필터로 쓴다.
-  std::vector<std::pair<Eigen::Vector3f, int>> collect_map_points()
+  // 수로, 시각화에서 신뢰도 필터로 쓴다. t_first 는 그 점을 관측한 키프레임 중 가장 이른
+  // 것의 타임스탬프로(궤적 파일과 같은 시간축), 주행을 다시 볼 때 점이 나타나는 시각이 된다.
+  // 점을 처음 만든 키프레임이 나중에 지워졌으면 남은 관측 중 가장 이른 시각이 된다.
+  struct SavedPoint
   {
-    std::vector<std::pair<Eigen::Vector3f, int>> points;
+    Eigen::Vector3f pos;
+    int observations;
+    double t_first;
+  };
+
+  std::vector<SavedPoint> collect_map_points()
+  {
+    std::vector<SavedPoint> points;
     for (ORB_SLAM3::MapPoint * mp : slam_->GetCurrentMap()->GetAllMapPoints()) {
-      if (mp && !mp->isBad()) {
-        points.emplace_back(mp->GetWorldPos(), mp->Observations());
+      if (!mp || mp->isBad()) {
+        continue;
       }
+      double t_first = std::numeric_limits<double>::infinity();
+      for (const auto & obs : mp->GetObservations()) {
+        if (obs.first) {
+          t_first = std::min(t_first, obs.first->mTimeStamp);
+        }
+      }
+      points.push_back({mp->GetWorldPos(), mp->Observations(), t_first});
     }
     return points;
   }
 
   // ASCII PLY 로 저장한다. 좌표는 궤적 파일과 같은 orb_world 프레임, 스케일 없는 ORB 단위다.
-  void write_map_points(
-    const std::string & path, const std::vector<std::pair<Eigen::Vector3f, int>> & points)
+  void write_map_points(const std::string & path, const std::vector<SavedPoint> & points)
   {
     std::ofstream out(path);
     if (!out) {
@@ -418,9 +436,10 @@ private:
         << "comment ORB-SLAM3 map points, frame orb_world, unscaled ORB units\n"
         << "element vertex " << points.size() << "\n"
         << "property float x\nproperty float y\nproperty float z\n"
-        << "property int observations\nend_header\n";
-    for (const auto & [p, obs] : points) {
-      out << p.x() << ' ' << p.y() << ' ' << p.z() << ' ' << obs << '\n';
+        << "property int observations\nproperty double t_first\nend_header\n";
+    for (const auto & p : points) {
+      out << p.pos.x() << ' ' << p.pos.y() << ' ' << p.pos.z() << ' ' << p.observations << ' '
+          << std::fixed << std::setprecision(6) << p.t_first << std::defaultfloat << '\n';
     }
     RCLCPP_INFO(get_logger(), "맵 포인트 %zu 개 저장: %s", points.size(), path.c_str());
   }
