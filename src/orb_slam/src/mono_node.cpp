@@ -9,6 +9,8 @@
 //                                 [2] 큰 맵 변경 횟수 — loop closure / 맵 병합 / GBA 누적
 //        /orb_slam3/map_points    sensor_msgs/PointCloud2, frame "orb_world", 스케일 없음
 // 서비스 ~/save_map               std_srvs/Trigger — ORB-SLAM3 를 종료하면서 Atlas 저장
+// 종료 시 trajectory_path      현재 맵의 키프레임 궤적 (TUM)
+//         map_points_path      현재 맵의 맵 포인트 (ASCII PLY: x y z observations)
 //
 // 스케일과 map 프레임 정렬은 scale_aligner 가 맡는다. 이 노드는 ORB-SLAM3 가 내놓는
 // 값을 그대로 옮기기만 한다.
@@ -87,6 +89,10 @@ public:
     trajectory_path_ = declare_parameter<std::string>("trajectory_path", "");
     if (!trajectory_path_.empty()) {
       trajectory_path_ = expand(trajectory_path_);
+    }
+    map_points_path_ = declare_parameter<std::string>("map_points_path", "");
+    if (!map_points_path_.empty()) {
+      map_points_path_ = expand(map_points_path_);
     }
     const double cloud_rate = declare_parameter<double>("map_points_rate", 1.0);
 
@@ -343,6 +349,41 @@ private:
       slam_->SaveKeyFrameTrajectoryTUM(trajectory_path_);
       RCLCPP_INFO(get_logger(), "키프레임 궤적 저장: %s", trajectory_path_.c_str());
     }
+    if (!map_points_path_.empty()) {
+      save_map_points(map_points_path_);
+    }
+  }
+
+  // 현재 맵(키프레임 궤적과 같은 맵)의 맵 포인트를 ASCII PLY 로 저장한다.
+  // 좌표는 궤적 파일과 같은 orb_world 프레임, 스케일 없는 ORB 단위다.
+  // observations 는 그 점을 관측한 키프레임 수로, 시각화에서 신뢰도 필터로 쓴다.
+  void save_map_points(const std::string & path)
+  {
+    ORB_SLAM3::Map * map = slam_->GetCurrentMap();
+    if (!map) {
+      RCLCPP_WARN(get_logger(), "현재 맵이 없어 맵 포인트를 저장하지 않는다");
+      return;
+    }
+    std::vector<std::pair<Eigen::Vector3f, int>> points;
+    for (ORB_SLAM3::MapPoint * mp : map->GetAllMapPoints()) {
+      if (mp && !mp->isBad()) {
+        points.emplace_back(mp->GetWorldPos(), mp->Observations());
+      }
+    }
+    std::ofstream out(path);
+    if (!out) {
+      RCLCPP_ERROR(get_logger(), "맵 포인트 파일을 열 수 없다: %s", path.c_str());
+      return;
+    }
+    out << "ply\nformat ascii 1.0\n"
+        << "comment ORB-SLAM3 map points, frame orb_world, unscaled ORB units\n"
+        << "element vertex " << points.size() << "\n"
+        << "property float x\nproperty float y\nproperty float z\n"
+        << "property int observations\nend_header\n";
+    for (const auto & [p, obs] : points) {
+      out << p.x() << ' ' << p.y() << ' ' << p.z() << ' ' << obs << '\n';
+    }
+    RCLCPP_INFO(get_logger(), "맵 포인트 %zu 개 저장: %s", points.size(), path.c_str());
   }
 
   static constexpr size_t kMaxCloud = 300000;
@@ -353,6 +394,7 @@ private:
   std::string mode_;
   std::string runtime_settings_;
   std::string trajectory_path_;
+  std::string map_points_path_;
 
   int prev_state_{ORB_SLAM3::Tracking::NO_IMAGES_YET};
   int epoch_{0};

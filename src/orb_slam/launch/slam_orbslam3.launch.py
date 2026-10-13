@@ -31,6 +31,8 @@ ORB-SLAM3 는 프레임 간 연속 추적이 전제라 Pi 의 sensors.launch.py 
     atlas_path     Atlas 저장/불러오기 경로 (ORB-SLAM3 가 .osa 를 붙인다)
     use_viewer     ORB-SLAM3 자체 Pangolin 뷰어 (기본 false, RViz 를 쓴다)
     trajectory_path  종료 시 키프레임 궤적(TUM) 저장 경로, 비우면 저장 안 함
+    map_points_path  종료 시 맵 포인트(PLY) 저장 경로, 비우면 저장 안 함
+                     둘 다 현재 맵 기준이며 `ros2 run orb_slam plot_map` 으로 그린다.
 """
 
 from pathlib import Path
@@ -78,6 +80,7 @@ def _launch_nodes(context):
                 "atlas_path": LaunchConfiguration("atlas_path"),
                 "use_viewer": LaunchConfiguration("use_viewer"),
                 "trajectory_path": LaunchConfiguration("trajectory_path"),
+                "map_points_path": LaunchConfiguration("map_points_path"),
             }
         ],
         remappings=[("image", "/camera/image_decompressed")],
@@ -138,6 +141,11 @@ def generate_launch_description():
                 "trajectory_path",
                 default_value=str(ORB_DIR / "kf_trajectory.txt"),
                 description="종료 시 키프레임 궤적(TUM 형식) 저장 경로. 비우면 저장 안 함",
+            ),
+            DeclareLaunchArgument(
+                "map_points_path",
+                default_value=str(ORB_DIR / "map_points.ply"),
+                description="종료 시 현재 맵의 맵 포인트(ASCII PLY) 저장 경로. 비우면 저장 안 함",
             ),
             OpaqueFunction(function=_launch_nodes),
         ]

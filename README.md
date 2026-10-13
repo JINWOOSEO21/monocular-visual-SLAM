@@ -275,6 +275,7 @@ rosbag 으로 재현할 때는 `use_sim_time:=true` + `ros2 bag play <bag> --clo
 | `atlas_path` | `~/.ros/orbslam3/atlas` | Atlas 저장/불러오기 경로 |
 | `use_viewer` | `false` | ORB-SLAM3 자체 Pangolin 뷰어 |
 | `trajectory_path` | `~/.ros/orbslam3/kf_trajectory.txt` | 종료 시 키프레임 궤적(TUM) |
+| `map_points_path` | `~/.ros/orbslam3/map_points.ply` | 종료 시 맵 포인트(ASCII PLY: `x y z observations`) |
 
 ```bash
 ros2 launch orb_slam slam.launch.py rviz:=false          # 뷰어 없이 (헤드리스)
@@ -308,6 +309,23 @@ Fixed Frame 은 `map` 이다. ORB-SLAM3 가 초기화되고 스케일이 잡히�
 
 > 다른 설정 파일을 쓰려면 `rviz_config:=/경로/my.rviz` 로 넘긴다.
 > 이 인자는 `slam.launch.py` 에서도 그대로 받는다.
+
+### 5. 주행 후 궤적·맵 포인트 그리기
+
+SLAM 을 Ctrl-C 로 끄면 `trajectory_path` / `map_points_path` 에 **종료 시점의 현재 맵**의
+키프레임 궤적과 맵 포인트(삼각측량된 ORB 특징점의 3D 위치)가 저장된다. 둘 다 `orb_world`
+프레임(첫 키프레임의 카메라 광학 프레임), 스케일 없는 ORB 단위다.
+
+```bash
+ros2 run orb_slam plot_map --scale 2.39                    # 스케일 = scale_aligner 의 "스케일 확정" 값
+ros2 run orb_slam plot_map --scale 2.39 --out map.png      # 창 대신 파일로
+ros2 run orb_slam plot_map --level mount --pitch-deg 17.5  # 장착 각도로 수평 정렬
+```
+
+카메라가 기울어 있으면 궤적도 기울어 보이므로 바닥을 수평으로 돌려서 그린다. 기본
+`--level pca` 는 궤적에 평면을 맞추는 방식이라 장착 각도를 몰라도 된다. 출력되는
+"궤적 평면으로 추정한 카메라 들림 각도" 는 `sensor_tf.launch.py` 의 카메라 pitch 를
+검증하는 데 쓸 수 있다. 정렬 후 키프레임 높이 표준편차가 0 에 가까워야 정상이다.
 
 ## 캘리브레이션
 

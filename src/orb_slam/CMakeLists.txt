@@ -92,6 +92,9 @@ install(TARGETS mono_node DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS scripts/scale_aligner.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME scale_aligner)
+install(PROGRAMS scripts/plot_map.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME plot_map)
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 
 ament_package()
