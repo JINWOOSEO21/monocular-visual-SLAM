@@ -4,7 +4,7 @@
 실행되는 노드:
     1. camera_ros (카메라 이미지 퍼블리시)
     2. mpu6050_node (IMU raw 데이터)
-    3. imu_filter_madgwick (orientation 필터)
+    3. imu_kalman_node (roll/pitch 칼만 필터, orientation 을 채운다)
     4. static TF: base_link → camera_link, camera_optical_frame, imu_link
     5. encoder_node + odometry_node (휠 오도메트리)
     6. robot_localization EKF (/odom + /imu/data → /odometry/filtered)
@@ -40,7 +40,7 @@ def generate_launch_description():
     imu_dir = Path(get_package_share_directory("imu_mpu6050"))
     odom_dir = Path(get_package_share_directory("motor_encoder"))
 
-    # IMU 파이프라인 (mpu6050 + madgwick filter)
+    # IMU 파이프라인 (mpu6050_node + imu_kalman_node)
     imu_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(imu_dir / "launch" / "imu.launch.py"))
     )

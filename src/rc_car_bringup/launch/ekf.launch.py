@@ -3,7 +3,7 @@ robot_localization EKF — wheel odom + IMU 융합
 
 입력:
     /odom        (nav_msgs/Odometry, motor_encoder)
-    /imu/data    (sensor_msgs/Imu, madgwick filtered)
+    /imu/data    (sensor_msgs/Imu, imu_mpu6050/imu_kalman_node)
 
 출력:
     /odometry/filtered   (nav_msgs/Odometry)

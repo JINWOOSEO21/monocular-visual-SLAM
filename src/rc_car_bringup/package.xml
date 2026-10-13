@@ -16,7 +16,6 @@
   <exec_depend>camera_ros</exec_depend>
   <exec_depend>camera_calibration</exec_depend>  <!-- intrinsic_calibration.launch.py (PC 측 GUI) -->
   <exec_depend>imu_mpu6050</exec_depend>
-  <exec_depend>imu_filter_madgwick</exec_depend>
   <exec_depend>motor_encoder</exec_depend>
   <exec_depend>robot_localization</exec_depend>
 

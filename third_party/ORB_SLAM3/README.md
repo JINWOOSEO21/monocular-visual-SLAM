@@ -1,3 +1,37 @@
+# Local patches (rc_car project)
+
+> This section is added by the rc_car project and is **not** part of upstream ORB-SLAM3.
+> The upstream README starts below the horizontal rule.
+
+This directory is a vendored copy of [UZ-SLAMLab/ORB_SLAM3](https://github.com/UZ-SLAMLab/ORB_SLAM3)
+at commit `4452a3c`, kept as two commits in this repository:
+
+1. **Upstream commit** — `4452a3c` as-is (dataset examples and `evaluation/` removed).
+2. **Patch commit** — the local changes listed below. Every change point in the source
+   carries an `rc_car patch:` comment.
+
+```bash
+git log --oneline -- third_party/ORB_SLAM3                 # upstream / patch commits
+git show <patch commit> -- third_party/ORB_SLAM3           # what was changed
+git format-patch -1 <patch commit> -- third_party/ORB_SLAM3   # export a .patch for another version
+```
+
+Patches:
+
+- `System::Shutdown()` stops the viewer and waits for the local mapping / loop closing
+  threads before saving the Atlas (upstream segfaults or hangs on Ctrl-C).
+- `Map::PreSave` / `MapPoint::PreSave` iterate over copies of their containers
+  (upstream crashes with SIGSEGV while saving the Atlas).
+- Added `System::GetCurrentMap()` — `mono_node` uses it to detect map changes (new map / merge)
+  and to save the current map's points.
+- Removed `-march=native` from the ORB_SLAM3, g2o and DBoW2 CMakeLists (with it, the process
+  dies with `double free or corruption` right after "New Map created").
+
+Build with `scripts/build_third_party.sh` from the repository root. Do not run `make clean`
+or `--clean-first` on the ORB_SLAM3 build tree — it also deletes the g2o library.
+
+---
+
 # ORB-SLAM3
 
 ### V1.0, December 22th, 2021

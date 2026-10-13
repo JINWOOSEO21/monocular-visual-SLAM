@@ -8,7 +8,8 @@
                   시각을 읽어 그림에 표시한다. launch.log 의 줄 앞 시각(벽시계)을 쓰므로
                   실시간 실행 기준이다 (rosbag 재생이면 시각이 맞지 않는다).
 
-출력 (여러 개를 함께 줄 수 있다. 아무것도 없으면 정적 그림을 창으로 띄운다)
+출력 (여러 개를 함께 줄 수 있다. 하나도 없으면 세 가지를 모두 --outdir 에
+<이름>_map.png / <이름>_run.gif / <이름>_viewer.html 로 저장하고, --show 면 정적 그림을 창으로 띄운다)
     --out      정적 그림 (.png / .pdf). 위에서 본 그림 + 옆에서 본 그림
     --animate  주행 애니메이션 (.gif). 궤적이 시간 순서대로 그려진다
     --html     브라우저에서 돌려 보는 3D 뷰어 (자체 완결 HTML, Plotly 는 CDN 에서 읽는다)
@@ -36,10 +37,9 @@ orb_world 는 맵을 시작한 키프레임의 카메라 광학 프레임(x 오�
                               처음 들어온 시각. 가림은 따지지 않고, 그 점이 보인 가장 가까운
                               거리의 --reveal-range 배보다 멀면 안 보인 것으로 친다.
 
-    ros2 run orb_slam plot_map --scale 2.39
+    ros2 run orb_slam plot_map --scale 2.39 --show
     ros2 run orb_slam plot_map --level mount --pitch-deg 20 --out map.png
-    ros2 run orb_slam plot_map --scale 2.6 --events ~/.ros/log/<실행>/launch.log \\
-        --name test_1820 --out map.png --animate run.gif --html viewer.html
+    ros2 run orb_slam plot_map --scale 2.6 --events ~/.ros/log/<실행>/launch.log --name test_1820
 """
 
 import argparse
@@ -859,11 +859,24 @@ def main():
                     help="관측 시각 추정에 쓸 ORB-SLAM3 설정 yaml (기본: orb_slam 의 imx219_820x616.yaml)")
     ap.add_argument("--reveal-range", type=float, default=3.0,
                     help="관측 시각 추정: 점이 보인 가장 가까운 거리의 이 배수까지만 보인 것으로 친다")
+    ap.add_argument("--outdir",
+                    help="출력 경로를 하나도 주지 않았을 때 세 가지를 저장할 폴더 (기본: 궤적 파일 폴더)")
+    ap.add_argument("--show", action="store_true",
+                    help="파일 대신 정적 그림을 창으로 띄운다")
     args = ap.parse_args()
 
     run = Run(args)
     run.summary()
-    if args.out or not (args.animate or args.html):
+    if args.show:
+        plot_static(run, None, args.zrange)
+    elif not (args.out or args.animate or args.html):
+        # 출력 경로를 하나도 안 주면 세 가지를 모두 <이름>_map.png / _run.gif / _viewer.html 로
+        outdir = Path(args.outdir or Path(args.trajectory).parent).expanduser()
+        outdir.mkdir(parents=True, exist_ok=True)
+        args.out = str(outdir / f"{run.name}_map.png")
+        args.animate = str(outdir / f"{run.name}_run.gif")
+        args.html = str(outdir / f"{run.name}_viewer.html")
+    if args.out:
         plot_static(run, args.out, args.zrange)
     if args.animate:
         animate(run, args.animate, args.speed, args.fps, reveal=not args.static_points)
