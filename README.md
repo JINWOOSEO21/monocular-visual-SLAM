@@ -259,13 +259,3 @@ python3 src/imu_mpu6050/scripts/calibrate_accel.py
 Follow the prompts to hold the IMU in six orientations (each axis up and down). The result
 is saved to `src/imu_mpu6050/config/imu_calibration.yaml` and applied the next time
 `mpu6050_node` starts; the log should then show `Gravity check OK: |a|=9.8xx m/s²`.
-
-## Sensor fusion
-
-`rc_car_bringup/config/ekf.yaml` (`two_d_mode: true`):
-
-| Source | States used | Why |
-|---|---|---|
-| `/odom` (wheels) | `vx`, `vy`, `vyaw` | pose accumulates slip, so only twist is used; `vy` enforces the non-holonomic constraint (zero sideways velocity) |
-| `/imu/data` (`imu_kalman_node`) | `yaw`, `vyaw` (differential) | no absolute heading reference, so only changes are used |
-| acceleration | **not used** | the RC car vibrates too much and double integration drifts badly |
