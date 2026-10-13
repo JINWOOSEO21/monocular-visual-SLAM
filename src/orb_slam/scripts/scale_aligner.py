@@ -28,6 +28,10 @@
     "새 맵 초기화"면 그 map key 에 저장된 스케일은 버린다 (리셋된 맵은 같은 포인터를
     다시 쓰지만 스케일은 새로 정해진다).
 
+    종료할 때 맵별 마지막 스케일을 scale_path(YAML)에 저장한다. current_map_key 는 종료
+    시점의 현재 맵으로, mono_node 가 저장하는 kf_trajectory.txt / map_points.ply 와 같은
+    맵이다. plot_map 은 --scale 을 주지 않으면 이 파일에서 그 맵의 스케일을 읽는다.
+
 map 프레임
     ORB-SLAM3 의 월드 프레임은 맵을 초기화한 키프레임의 카메라 프레임이고, 추적을
     잃고 새 맵을 만들 때마다 바뀐다. 그대로 쓰면 map 이 그때마다 튄다. 그래서 맵마다
@@ -42,6 +46,8 @@ map 프레임
 """
 
 import math
+import time
+from pathlib import Path
 
 import numpy as np
 import rclpy
@@ -49,6 +55,7 @@ import tf2_ros
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.duration import Duration
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.time import Time
@@ -118,6 +125,7 @@ class ScaleAligner(Node):
         self.window = p("window", 60).value  # 구간 수
         self.planar = p("planar", True).value
         self.tf_lead = p("tf_lead", 0.1).value  # s, map->odom 을 약간 미래로 찍는다
+        self.scale_path = p("scale_path", "").value  # 종료 시 맵별 스케일 저장, 비우면 안 함
         rate = p("publish_rate", 20.0).value
 
         self.tf_buffer = tf2_ros.Buffer()
@@ -129,6 +137,7 @@ class ScaleAligner(Node):
         self.epoch = None  # mono_node 가 알려준 맵 epoch
         self.map_key = None  # 지금 epoch 의 map key (구버전 mono_node 면 None)
         self.map_scales = {}  # map key -> 그 맵에서 마지막으로 구한 스케일
+        self.map_stats = {}  # map key -> 그 스케일을 구한 구간 정보 (종료 시 저장용)
         self._reset_map()
 
         self.odom_pub = self.create_publisher(Odometry, "/orb_slam3/odometry", 10)
@@ -170,6 +179,7 @@ class ScaleAligner(Node):
 
         if reason == EPOCH_NEW_MAP:
             self.map_scales.pop(self.map_key, None)
+            self.map_stats.pop(self._stats_key(), None)
         elif self.map_key in self.map_scales:
             self.scale = self.map_scales[self.map_key]
             self.scale_inherited = True
@@ -283,6 +293,39 @@ class ScaleAligner(Node):
         self.scale_inherited = False
         if self.map_key is not None:
             self.map_scales[self.map_key] = new_scale
+        self.map_stats[self._stats_key()] = {
+            "scale": round(new_scale, 4),
+            "segments_used": int(keep.sum()),
+            "segments": len(seg),
+            "odom_path_m": round(self.path_len, 2),
+        }
+
+    def _stats_key(self):
+        # 구버전 mono_node(map key 없음)면 맵을 구분할 수 없으니 -1 하나로 둔다
+        return self.map_key if self.map_key is not None else -1
+
+    def save_scales(self):
+        """맵별 마지막 스케일을 scale_path 에 YAML 로 저장한다."""
+        if not self.scale_path:
+            return
+        path = Path(self.scale_path).expanduser()
+        current = self._stats_key()
+        lines = [
+            "# scale_aligner 가 종료 시 저장한 맵별 스케일 (1 ORB 단위 = scale m).",
+            "# current_map_key 는 종료 시점의 현재 맵 = kf_trajectory.txt / map_points.ply 의 맵.",
+            f"saved_at: {time.strftime('%Y-%m-%dT%H:%M:%S')}",
+            f"current_map_key: {current}",
+            "maps:" if self.map_stats else "maps: {}",
+        ]
+        for key, st in self.map_stats.items():
+            lines.append(f"  {key}:")
+            lines += [f"    {name}: {value}" for name, value in st.items()]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n")
+        st = self.map_stats.get(current)
+        msg = (f"현재 맵(key {current}) 스케일 {st['scale']:.3f} m" if st
+               else f"현재 맵(key {current})은 스케일이 정해지기 전에 끝났다")
+        print(f"[orb_scale_aligner] 스케일 저장: {path} — {msg}", flush=True)
 
     # ── 출력 ─────────────────────────────────────────────────────
     def publish_tf(self):
@@ -324,9 +367,10 @@ def main():
     node = ScaleAligner()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        node.save_scales()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

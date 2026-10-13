@@ -200,6 +200,7 @@ PC: slam_inputs ──▶ /camera/image_decompressed
 | `use_viewer` | `false` | ORB-SLAM3's own Pangolin viewer |
 | `trajectory_path` | `~/.ros/orbslam3/kf_trajectory.txt` | keyframe trajectory (TUM) written on shutdown |
 | `map_points_path` | `~/.ros/orbslam3/map_points.ply` | map points (ASCII PLY: `x y z observations t_first`) written on shutdown |
+| `scale_path` | `~/.ros/orbslam3/scale.yaml` | per-map scale from `scale_aligner`, written on shutdown (read by `plot_map`) |
 
 Raw images drop to ~17 fps over Wi-Fi, so the Pi sends only compressed images and the PC
 decompresses them with `image_transport/republish`. Loop closure only happens when the car
@@ -207,19 +208,21 @@ passes the same place **in the same direction**, so drive test loops in one dire
 
 ### 4. PC — plot a finished run
 
-Stopping SLAM with Ctrl-C saves the current map's keyframe trajectory and map points to
-`~/.ros/orbslam3/`. To create the static figure, the driving animation and the 3D viewer:
+Stopping SLAM with Ctrl-C saves the current map's keyframe trajectory, map points and
+scale (`scale.yaml`) to `~/.ros/orbslam3/`. To create the static figure, the driving
+animation and the 3D viewer:
 
 ```bash
-ros2 run orb_slam plot_map --scale <s> --name <run> --events ~/.ros/log/<run log dir>/launch.log
+ros2 run orb_slam plot_map --name <run> --events ~/.ros/log/<run log dir>/launch.log
 ```
 
 - Writes `<run>_map.png`, `<run>_run.gif` and `<run>_viewer.html` next to the trajectory
   file (`--outdir` to change). The HTML page opens directly in a browser.
-- `--scale` is the value `scale_aligner` printed when the scale was fixed ("스케일 확정").
+- The scale (m per ORB unit) is read from `scale.yaml` next to the trajectory file; pass
+  `--scale <s>` to override it.
 - `--events` (optional) marks new map / map merge / loop closure on all three.
-- The next run overwrites `kf_trajectory.txt` / `map_points.ply`; copy them to keep a run and
-  pass them with `--trajectory` / `--points`.
+- The next run overwrites `kf_trajectory.txt` / `map_points.ply` / `scale.yaml`; copy them
+  together to keep a run and pass them with `--trajectory` / `--points`.
 
 ## Calibration
 

@@ -27,8 +27,10 @@ orb_world 는 맵을 시작한 키프레임의 카메라 광학 프레임(x 오�
 어느 방식이든 pca 로 추정한 카메라 들림 각도를 함께 출력하므로, TF 의 pitch 를
 검증하는 데 쓸 수 있다.
 
-수평 정렬 후 좌표는 첫 키프레임의 로봇 기준 x 전방, y 왼쪽, z 위이고, --scale 을 주면
-(scale_aligner 가 출력한 "1 ORB 단위 = s m") 미터가 된다.
+수평 정렬 후 좌표는 첫 키프레임의 로봇 기준 x 전방, y 왼쪽, z 위이고, 스케일
+("1 ORB 단위 = s m")을 곱해 미터로 그린다. 스케일은 --scale 로 주거나, 주지 않으면
+scale_aligner 가 종료 시 궤적 파일 옆에 저장한 scale.yaml(--scale-file)에서 현재 맵의
+값을 읽는다. 둘 다 없으면 ORB 단위 그대로 그린다.
 
 애니메이션과 3D 뷰어는 맵 포인트를 처음 관측된 시각에 하나씩 나타나게 해서 지도가 쌓여
 가는 모습을 보여 준다 (--static-points 면 처음부터 다 보인다). 그 시각은
@@ -37,6 +39,7 @@ orb_world 는 맵을 시작한 키프레임의 카메라 광학 프레임(x 오�
                               처음 들어온 시각. 가림은 따지지 않고, 그 점이 보인 가장 가까운
                               거리의 --reveal-range 배보다 멀면 안 보인 것으로 친다.
 
+    ros2 run orb_slam plot_map --show          # 스케일은 scale.yaml 에서
     ros2 run orb_slam plot_map --scale 2.39 --show
     ros2 run orb_slam plot_map --level mount --pitch-deg 20 --out map.png
     ros2 run orb_slam plot_map --scale 2.6 --events ~/.ros/log/<실행>/launch.log --name test_1820
@@ -91,6 +94,29 @@ def load_ply(path):
                 break
         rows = np.loadtxt(f, ndmin=2, max_rows=count) if count else np.empty((0, len(names)))
     return {name: rows[:, i] for i, name in enumerate(names)}
+
+
+def load_scale(path, trajectory):
+    """scale_aligner 가 저장한 scale.yaml 에서 현재 맵(=궤적 파일의 맵)의 스케일을 읽는다."""
+    import yaml
+
+    path = Path(path).expanduser()
+    if not path.is_file():
+        print(f"스케일 파일이 없어 ORB 단위로 그린다: {path} (--scale 로 줄 수 있다)")
+        return None
+    data = yaml.safe_load(path.read_text()) or {}
+    key = data.get("current_map_key")
+    entry = (data.get("maps") or {}).get(key)
+    if not entry:
+        print(f"{path}: 현재 맵(key {key})은 스케일이 정해지기 전에 끝났다 -> ORB 단위로 그린다")
+        return None
+    gap = abs(path.stat().st_mtime - Path(trajectory).stat().st_mtime)
+    if gap > 120:
+        print(f"주의: {path.name} 와 궤적 파일의 저장 시각이 {gap / 60:.0f} 분 다르다. "
+              "다른 실행의 스케일일 수 있다")
+    print(f"스케일 {entry['scale']:.3f} m / ORB 단위 ({path.name}, 맵 key {key}, "
+          f"{entry.get('segments_used')}/{entry.get('segments')} 구간)")
+    return float(entry["scale"])
 
 
 def load_events(path):
@@ -837,8 +863,10 @@ def main():
                     help="없으면 궤적만 그린다")
     ap.add_argument("--events", help="그 실행의 launch.log (새 맵 / 맵 병합 / 루프 클로저 표시)")
     ap.add_argument("--name", help="그림 제목에 쓸 실행 이름 (기본: 궤적 파일 이름)")
-    ap.add_argument("--scale", type=float, default=1.0,
-                    help="1 ORB 단위 = scale m (scale_aligner 의 '스케일 확정' 값)")
+    ap.add_argument("--scale", type=float,
+                    help="1 ORB 단위 = scale m. 주지 않으면 --scale-file 에서 읽는다")
+    ap.add_argument("--scale-file",
+                    help="scale_aligner 가 저장한 scale.yaml (기본: 궤적 파일과 같은 폴더)")
     ap.add_argument("--scale-approx", action="store_true",
                     help="스케일이 그 실행의 확정값이 아니라 근사값임을 그림에 표시한다")
     ap.add_argument("--level", choices=["pca", "mount", "none"], default="pca")
@@ -864,6 +892,9 @@ def main():
     ap.add_argument("--show", action="store_true",
                     help="파일 대신 정적 그림을 창으로 띄운다")
     args = ap.parse_args()
+    if args.scale is None:
+        scale_file = args.scale_file or Path(args.trajectory).parent / "scale.yaml"
+        args.scale = load_scale(scale_file, args.trajectory) or 1.0
 
     run = Run(args)
     run.summary()

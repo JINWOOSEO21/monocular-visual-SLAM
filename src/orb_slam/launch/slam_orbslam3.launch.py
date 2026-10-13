@@ -33,6 +33,8 @@ ORB-SLAM3 는 프레임 간 연속 추적이 전제라 Pi 의 sensors.launch.py 
     trajectory_path  종료 시 키프레임 궤적(TUM) 저장 경로, 비우면 저장 안 함
     map_points_path  종료 시 맵 포인트(PLY) 저장 경로, 비우면 저장 안 함
                      둘 다 현재 맵 기준이며 `ros2 run orb_slam plot_map` 으로 그린다.
+    scale_path     종료 시 scale_aligner 의 맵별 스케일(YAML) 저장 경로, 비우면 저장 안 함.
+                   plot_map 이 --scale 대신 읽는다.
 """
 
 from pathlib import Path
@@ -98,6 +100,7 @@ def _launch_nodes(context):
                 "odom_frame": "odom",
                 "base_frame": "base_link",
                 "camera_frame": "camera",
+                "scale_path": LaunchConfiguration("scale_path"),
             }
         ],
         remappings=[("odom", "/odometry/filtered")],
@@ -146,6 +149,11 @@ def generate_launch_description():
                 "map_points_path",
                 default_value=str(ORB_DIR / "map_points.ply"),
                 description="종료 시 현재 맵의 맵 포인트(ASCII PLY) 저장 경로. 비우면 저장 안 함",
+            ),
+            DeclareLaunchArgument(
+                "scale_path",
+                default_value=str(ORB_DIR / "scale.yaml"),
+                description="종료 시 맵별 스케일(YAML) 저장 경로. plot_map 이 읽는다. 비우면 저장 안 함",
             ),
             OpaqueFunction(function=_launch_nodes),
         ]
