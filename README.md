@@ -39,7 +39,7 @@ PC 쪽에서 ORB-SLAM3 단안 SLAM을 돌린 뒤 휠 오도메트리로 미터 �
 | 항목 | 사양 |
 |---|---|
 | 보드 | Raspberry Pi 4B 4GB, Ubuntu 22.04, ROS 2 Humble |
-| 카메라 | IMX219 (Arducam), CSI 연결, libcamera + 하드웨어 ISP. **정방향 장착** → TF `base_link→camera_link` 는 `roll=0` |
+| 카메라 | IMX219 (Arducam), CSI 연결, libcamera + 하드웨어 ISP. **정방향 장착, 전방에서 위로 30° 들림** → TF `base_link→camera_link` 는 `roll=0`, `pitch=-30°` |
 | 카메라 (보조) | Logitech C270, USB(UVC). **상하 반전 장착** → TF `base_link→c270_link` 에 `roll=π`. 아직 구독하는 노드 없음 |
 | IMU | MPU6050 (GY-521), I2C bus 1 @ `0x68` |
 | 모터 드라이버 | L298N |
@@ -319,7 +319,7 @@ SLAM 을 Ctrl-C 로 끄면 `trajectory_path` / `map_points_path` 에 **종료 �
 ```bash
 ros2 run orb_slam plot_map --scale 2.39                    # 스케일 = scale_aligner 의 "스케일 확정" 값
 ros2 run orb_slam plot_map --scale 2.39 --out map.png      # 창 대신 파일로
-ros2 run orb_slam plot_map --level mount --pitch-deg 17.5  # 장착 각도로 수평 정렬
+ros2 run orb_slam plot_map --level mount --pitch-deg 30    # 장착 각도(TF pitch 와 같은 값)로 수평 정렬
 ```
 
 카메라가 기울어 있으면 궤적도 기울어 보이므로 바닥을 수평으로 돌려서 그린다. 기본
