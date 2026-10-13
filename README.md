@@ -298,7 +298,7 @@ ros2 launch orb_slam rviz.launch.py
 
 | Display | 토픽 | 보이는 것 |
 |---|---|---|
-| ORB Map Points | `/orb_slam3/map_points` | ORB-SLAM3 맵 포인트 |
+| ORB Map Points | `/orb_slam3/map_points_map` | ORB-SLAM3 맵 포인트 (`scale_aligner` 가 map 프레임·미터로 변환, 스케일 확정 후부터) |
 | Odometry (EKF) | `/odometry/filtered` | EKF 추정 위치 |
 | Odometry (ORB-SLAM3) | `/orb_slam3/odometry` | 미터화된 SLAM 위치 |
 | Camera | `/camera/image_decompressed` | 카메라 원본 |

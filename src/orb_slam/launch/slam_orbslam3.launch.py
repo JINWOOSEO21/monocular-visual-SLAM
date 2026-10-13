@@ -11,12 +11,13 @@ ORB-SLAM3 단안 백엔드 (PC 측 실행) — slam.launch.py 를 통해 띄운�
         입력  /camera/image_decompressed (헤더 stamp 를 그대로 사용)
         출력  /orb_slam3/camera_pose  스케일 없는 T_world_cam
               /orb_slam3/state        tracking 상태 + Atlas 맵 id
-              /orb_slam3/map_points   PointCloud2 (RViz 용)
+              /orb_slam3/map_points   PointCloud2, orb_world 프레임, 스케일 없음
         서비스 ~/save_map             atlas_path 로 Atlas 저장
 
     scale_aligner   단안 포즈를 휠 오도메트리로 미터 단위화
         입력  /orb_slam3/camera_pose, /orb_slam3/state, /odometry/filtered, TF
         출력  /orb_slam3/odometry     map 프레임, 미터 단위
+              /orb_slam3/map_points_map  map 프레임, 미터 단위 (RViz 용)
               TF map → odom           (slam.launch.py 의 백엔드 계약)
 
 ORB-SLAM3 는 프레임 간 연속 추적이 전제라 Pi 의 sensors.launch.py 가 카메라를

@@ -5,7 +5,9 @@ slam.launch.py 와 별개로 띄울 수 있다. RViz 만 껐다 켜도 SLAM 은 
 같은 launch 에 묶는 것보다 이쪽이 실사용에 편하다.
 
 표시되는 것:
-    ORB Map Points /orb_slam3/map_points  ORB-SLAM3 맵 포인트 (미터 스케일 적용 전)
+    ORB Map Points /orb_slam3/map_points_map  scale_aligner 가 map 프레임·미터로 옮긴 맵 포인트
+                   (원본 /orb_slam3/map_points 는 orb_world 프레임이라 TF 로 map 에 닿지 않는다.
+                    스케일이 확정된 뒤부터 나온다.)
     Odometry (EKF) /odometry/filtered     EKF 추정 위치
     Odometry (ORB) /orb_slam3/odometry    scale_aligner 가 미터화한 SLAM 위치
     Camera         /camera/image_decompressed
