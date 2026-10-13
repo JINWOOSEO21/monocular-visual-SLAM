@@ -7,32 +7,7 @@ ORB-SLAM3 on the camera stream and gives it metric scale from the wheel odometry
 The Pi only publishes sensor data and drives the motors; all SLAM computation runs on the
 PC. The two talk over ROS 2 DDS on the same Wi-Fi network.
 
-```
-┌─────────────────── Raspberry Pi 4B ────────────────────┐      ┌──────── PC ────────┐
-│                                                        │      │                    │
-│  IMX219 CSI ──▶ camera_ros ──▶ /camera/image_raw       │      │                    │
-│                             └▶ /camera/image_raw/      │─Wi-Fi▶  image_transport   │
-│                                        compressed      │      │     republish      │
-│                                                        │      │         │          │
-│  MPU6050 ──▶ mpu6050_node ──▶ /imu/data_raw            │      │         ▼          │
-│   (I2C)             │                                  │      │  orb_slam3 (mono)  │
-│                     ▼                                  │      │         │          │
-│              imu_kalman_node ──▶ /imu/data             │      │   scale_aligner    │
-│                                    │                   │      │         ▼          │
-│  Encoders ──▶ encoder_node ──▶ /encoder/ticks          │      │   TF: map → odom   │
-│  (GPIO)            │                                   │      │ /orb_slam3/odometry│
-│                    ▼                                   │      └────────────────────┘
-│             odometry_node ──▶ /odom                    │
-│                                    │                   │
-│                    ┌───────────────┴────┐              │
-│                    ▼                    ▼              │
-│               robot_localization EKF ──▶ /odometry/filtered
-│                                          TF: odom → base_link
-│                                                        │
-│  /cmd_vel ──▶ pid_controller_node ──▶ L298N ──▶ motors │
-│               (or motor_driver_node)                   │
-└────────────────────────────────────────────────────────┘
-```
+![System architecture](docs/architecture.svg)
 
 ## Hardware
 
@@ -73,6 +48,7 @@ and y forward, hence `yaw = -π/2`.
 ```
 orb-slam/
 ├── README.md
+├── docs/                       # README figures
 ├── pyproject.toml              # ruff config
 ├── scripts/
 │   └── build_third_party.sh    # builds ORB-SLAM3 + Pangolin (PC only, once before colcon)
