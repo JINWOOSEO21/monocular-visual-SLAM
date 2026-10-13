@@ -10,7 +10,7 @@ ORB-SLAM3 단안 백엔드 (PC 측 실행) — slam.launch.py 를 통해 띄운�
     mono_node       ORB-SLAM3 System::TrackMonocular 래퍼
         입력  /camera/image_decompressed (헤더 stamp 를 그대로 사용)
         출력  /orb_slam3/camera_pose  스케일 없는 T_world_cam
-              /orb_slam3/state        tracking 상태 + Atlas 맵 id
+              /orb_slam3/state        [tracking 상태, 맵 epoch, 큰 변경 횟수, map key, epoch 이유]
               /orb_slam3/map_points   PointCloud2, orb_world 프레임, 스케일 없음
         서비스 ~/save_map             atlas_path 로 Atlas 저장
 

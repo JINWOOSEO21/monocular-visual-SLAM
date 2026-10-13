@@ -6,7 +6,9 @@
 //        /orb_slam3/state         std_msgs/Int32MultiArray
 //                                 [0] tracking 상태 (ORB_SLAM3::Tracking::eTrackingState)
 //                                 [1] 맵 epoch — 새 맵 초기화 / 맵 병합 때마다 1 씩 증가
-//                                 [2] 큰 맵 변경 횟수 — loop closure / 맵 병합 / GBA 누적
+//                                 [2] 큰 맵 변경 횟수 — loop closure / GBA 누적
+//                                 [3] 현재 epoch 의 map key — Map 포인터마다 붙인 번호
+//                                 [4] epoch 가 바뀐 이유 — 1 새 맵 초기화, 2 기존 맵으로 전환
 //        /orb_slam3/map_points    sensor_msgs/PointCloud2, frame "orb_world", 스케일 없음
 // 서비스 ~/save_map               std_srvs/Trigger — ORB-SLAM3 를 종료하면서 Atlas 저장
 // 종료 시 trajectory_path      현재 맵의 키프레임 궤적 (TUM)
@@ -18,6 +20,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -58,6 +61,13 @@ constexpr int kOk = ORB_SLAM3::Tracking::OK;
 
 // 15 Hz 에서 프레임 3 장 이상이 빠지면 누락으로 본다.
 constexpr double kFrameGapWarn = 0.2;
+
+// 이보다 크게 뒤로 가면 프레임 순서 뒤바뀜이 아니라 시계 리셋(rosbag 재시작 등)으로 본다.
+constexpr double kClockReset = 1.0;
+
+// /orb_slam3/state[4]: epoch 가 바뀐 이유
+constexpr int kEpochNewMap = 1;     // 새 맵 초기화 — 좌표계와 스케일을 새로 정했다
+constexpr int kEpochMapSwitch = 2;  // 이미 있던 맵으로 전환 (병합, 다른 맵에서 재위치 추정)
 
 const char * state_name(int state)
 {
@@ -200,12 +210,27 @@ private:
     const double stamp = rclcpp::Time(msg->header.stamp).seconds();
 
     std::lock_guard<std::mutex> lock(slam_mutex_);
-    // 직전 프레임과의 간격. 뒤로 가면 ORB-SLAM3 가 맵을 버리고 새로 만들고,
-    // 크게 벌어지면 (Wi-Fi 누락) 프레임 사이 움직임이 커져 추적을 잃기 쉽다.
+    // 직전 프레임과의 간격. 크게 벌어지면 (Wi-Fi 누락) 프레임 사이 움직임이 커져 추적을
+    // 잃기 쉽다.
     const double gap = last_stamp_ > 0.0 ? stamp - last_stamp_ : 0.0;
+    // 직전 프레임보다 이르거나 같은 시각의 프레임을 ORB-SLAM3 에 넘기면, 추적이 아무리
+    // 좋아도 현재 맵을 버리고 새 맵을 만든다 (Tracking::Track 의 "timestamp older than
+    // previous frame"). Wi-Fi 가 흔들릴 때 한 프레임이 늦게 도착해 순서가 뒤바뀐 실측이
+    // 있어서(2026-10-13, 67 ms 역행으로 추적 점 398 개짜리 맵이 끊김) 이런 프레임은 버린다.
+    // 단 kClockReset 이상 크게 뒤로 가면 rosbag 재시작처럼 시계 자체가 되돌아간 것이므로
+    // 버리지 않고 넘긴다 — 계속 버리면 이후 프레임을 영영 처리하지 못한다.
+    if (last_stamp_ > 0.0 && gap <= 0.0 && gap > -kClockReset) {
+      ++dropped_frames_;
+      RCLCPP_WARN(
+        get_logger(), "직전보다 %.0f ms 이른(또는 같은) 프레임을 버린다 — 순서 뒤바뀜, 누적 %d 회",
+        std::fabs(gap) * 1000.0, dropped_frames_);
+      return;
+    }
     last_stamp_ = stamp;
     if (gap < 0.0) {
-      RCLCPP_WARN(get_logger(), "타임스탬프가 %.0f ms 뒤로 갔다 — ORB-SLAM3 가 새 맵을 만든다", -gap * 1000.0);
+      RCLCPP_WARN(
+        get_logger(), "타임스탬프가 %.1f s 뒤로 갔다 (시계 리셋으로 본다) — ORB-SLAM3 가 새 맵을 만든다",
+        -gap);
     } else if (gap > kFrameGapWarn) {
       ++frame_gaps_;
       RCLCPP_WARN(
@@ -243,17 +268,22 @@ private:
       ORB_SLAM3::Map * map = slam_->GetCurrentMap();
       if (prev_state_ == kNotInitialized) {
         ++epoch_;
+        epoch_reason_ = kEpochNewMap;
+        map_key_ = key_of(map);
         cloud_.clear();
-        RCLCPP_INFO(get_logger(), "새 맵 초기화 (epoch %d)", epoch_);
+        RCLCPP_INFO(get_logger(), "새 맵 초기화 (epoch %d, map key %d)", epoch_, map_key_);
       } else if (map != epoch_map_) {
         ++epoch_;
+        epoch_reason_ = kEpochMapSwitch;
+        map_key_ = key_of(map);
         cloud_.clear();
         // 병합은 LoopClosing 스레드에서 끝나므로, 위의 TrackMonocular 가 병합 전 좌표계로
         // 끝난 직후에 맵이 바뀌었을 수 있다. 이 프레임 포즈는 어느 좌표계인지 알 수 없어
         // 버린다. 다음 프레임부터는 병합 뒤에 추적하므로 새 좌표계다.
         publish_pose = false;
         RCLCPP_INFO(
-          get_logger(), "현재 맵이 바뀜 — 맵 병합 또는 다른 맵에서 재위치 추정 (epoch %d)", epoch_);
+          get_logger(), "현재 맵이 바뀜 — 맵 병합 또는 다른 맵에서 재위치 추정 (epoch %d, map key %d)",
+          epoch_, map_key_);
       }
       epoch_map_ = map;
     }
@@ -265,7 +295,7 @@ private:
     prev_state_ = state;
 
     std_msgs::msg::Int32MultiArray st;
-    st.data = {state, epoch_, big_changes_};
+    st.data = {state, epoch_, big_changes_, map_key_, epoch_reason_};
     state_pub_->publish(st);
 
     if (state != kOk || !publish_pose) {
@@ -343,6 +373,14 @@ private:
       return;
     }
     RCLCPP_INFO(get_logger(), "ORB-SLAM3 종료 중 (slam 모드면 Atlas 저장)...");
+    // 맵 포인트는 Shutdown() 전에 모은다. Shutdown() 이 Atlas 를 저장하면서 키프레임이 없는
+    // 맵을 bad 로 만드는데(Atlas::PreSave), 그 맵이 현재 맵이면 이후 GetCurrentMap() 이
+    // bad 가 풀리기를 영원히 기다린다 (2026-10-13 실측: 추적을 잃고 막 새 맵을 만든 상태에서
+    // 종료하면 이 자리에서 멈춰 SIGKILL 로 끝났다).
+    std::vector<std::pair<Eigen::Vector3f, int>> points;
+    if (!map_points_path_.empty()) {
+      points = collect_map_points();
+    }
     slam_->Shutdown();
     if (!trajectory_path_.empty()) {
       // 단안은 키프레임 궤적만 저장할 수 있다 (SaveTrajectoryTUM 은 스테레오/RGB-D 전용).
@@ -350,26 +388,27 @@ private:
       RCLCPP_INFO(get_logger(), "키프레임 궤적 저장: %s", trajectory_path_.c_str());
     }
     if (!map_points_path_.empty()) {
-      save_map_points(map_points_path_);
+      write_map_points(map_points_path_, points);
     }
   }
 
-  // 현재 맵(키프레임 궤적과 같은 맵)의 맵 포인트를 ASCII PLY 로 저장한다.
-  // 좌표는 궤적 파일과 같은 orb_world 프레임, 스케일 없는 ORB 단위다.
-  // observations 는 그 점을 관측한 키프레임 수로, 시각화에서 신뢰도 필터로 쓴다.
-  void save_map_points(const std::string & path)
+  // 현재 맵(키프레임 궤적과 같은 맵)의 맵 포인트. observations 는 그 점을 관측한 키프레임
+  // 수로, 시각화에서 신뢰도 필터로 쓴다.
+  std::vector<std::pair<Eigen::Vector3f, int>> collect_map_points()
   {
-    ORB_SLAM3::Map * map = slam_->GetCurrentMap();
-    if (!map) {
-      RCLCPP_WARN(get_logger(), "현재 맵이 없어 맵 포인트를 저장하지 않는다");
-      return;
-    }
     std::vector<std::pair<Eigen::Vector3f, int>> points;
-    for (ORB_SLAM3::MapPoint * mp : map->GetAllMapPoints()) {
+    for (ORB_SLAM3::MapPoint * mp : slam_->GetCurrentMap()->GetAllMapPoints()) {
       if (mp && !mp->isBad()) {
         points.emplace_back(mp->GetWorldPos(), mp->Observations());
       }
     }
+    return points;
+  }
+
+  // ASCII PLY 로 저장한다. 좌표는 궤적 파일과 같은 orb_world 프레임, 스케일 없는 ORB 단위다.
+  void write_map_points(
+    const std::string & path, const std::vector<std::pair<Eigen::Vector3f, int>> & points)
+  {
     std::ofstream out(path);
     if (!out) {
       RCLCPP_ERROR(get_logger(), "맵 포인트 파일을 열 수 없다: %s", path.c_str());
@@ -397,8 +436,19 @@ private:
   std::string map_points_path_;
 
   int prev_state_{ORB_SLAM3::Tracking::NO_IMAGES_YET};
+  // Map 포인터마다 붙이는 번호. ORB-SLAM3 의 map id 는 병합 때 바뀌지만(ChangeId) 포인터는
+  // 그대로라 scale_aligner 가 "어느 맵으로 돌아왔는지" 를 이 번호로 안다.
+  int key_of(ORB_SLAM3::Map * map)
+  {
+    return map_keys_.emplace(map, static_cast<int>(map_keys_.size())).first->second;
+  }
+
   int epoch_{0};
   ORB_SLAM3::Map * epoch_map_{nullptr};  // 지금 epoch 의 맵. 비교에만 쓰고 역참조하지 않는다
+  std::unordered_map<ORB_SLAM3::Map *, int> map_keys_;  // 포인터는 키로만 쓰고 역참조하지 않는다
+  int map_key_{-1};
+  int epoch_reason_{0};
+  int dropped_frames_{0};
   int big_changes_{0};
   double last_stamp_{0.0};
   int frame_gaps_{0};

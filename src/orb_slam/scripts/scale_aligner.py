@@ -3,7 +3,7 @@
 
 입력
     /orb_slam3/camera_pose   T_world_cam, 스케일 없음 (mono_node)
-    /orb_slam3/state         [tracking 상태, 맵 epoch, 큰 변경 횟수]
+    /orb_slam3/state         [tracking 상태, 맵 epoch, 큰 변경 횟수, map key, epoch 이유]
     /orb_slam3/map_points    orb_world 프레임 점들, 스케일 없음
     TF odom -> base_link     Pi 의 EKF (휠 + IMU)
     TF base_link -> camera   static TF (sensor_tf.launch.py)
@@ -20,6 +20,13 @@
     구간은 오도메트리 기준 min_segment 이상 움직일 때마다 하나씩 쌓고, 최근 window 개
     구간에서 중앙값의 0.5~2 배를 벗어나는 구간(휠 슬립 등)을 빼고 합의 비율로 구한다.
     누적 이동이 min_path 를 넘기 전에는 map -> odom 을 갱신하지 않는다.
+
+    맵 epoch 가 바뀔 때 이유가 "기존 맵으로 전환"(병합, 다른 맵에서 재위치 추정)이면,
+    그 맵(map key)에서 마지막으로 구한 스케일을 바로 이어 쓴다. 병합은 새 맵을 예전 맵의
+    좌표계·스케일로 옮겨 붙이는 것이라 예전 맵의 스케일이 그대로 맞는다. 이어 쓰는 동안에도
+    구간은 새로 쌓고, min_path 를 넘으면 새 구간으로 다시 구한 값으로 바꾼다. 이유가
+    "새 맵 초기화"면 그 map key 에 저장된 스케일은 버린다 (리셋된 맵은 같은 포인터를
+    다시 쓰지만 스케일은 새로 정해진다).
 
 map 프레임
     ORB-SLAM3 의 월드 프레임은 맵을 초기화한 키프레임의 카메라 프레임이고, 추적을
@@ -50,6 +57,9 @@ from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Int32MultiArray
 
 TRACKING_OK = 2  # ORB_SLAM3::Tracking::OK
+# /orb_slam3/state[4]: epoch 가 바뀐 이유 (mono_node.cpp 의 kEpochNewMap / kEpochMapSwitch)
+EPOCH_NEW_MAP = 1
+EPOCH_MAP_SWITCH = 2
 
 
 def quat_to_rot(x, y, z, w):
@@ -117,6 +127,8 @@ class ScaleAligner(Node):
         self.T_base_cam = None
         self.T_map_odom = np.eye(4)  # 스케일이 정해지기 전엔 항등
         self.epoch = None  # mono_node 가 알려준 맵 epoch
+        self.map_key = None  # 지금 epoch 의 map key (구버전 mono_node 면 None)
+        self.map_scales = {}  # map key -> 그 맵에서 마지막으로 구한 스케일
         self._reset_map()
 
         self.odom_pub = self.create_publisher(Odometry, "/orb_slam3/odometry", 10)
@@ -140,6 +152,7 @@ class ScaleAligner(Node):
         self.anchor = None  # A = 앵커 시점의 T_map_base
         self.cam0_inv = None  # inv(T_world_cam(t0))
         self.scale = None
+        self.scale_inherited = False  # 이어 쓴 스케일이면 True (새 추정이 나오면 False)
         self.segments = []  # (오도메트리 거리, ORB 거리)
         self.last_sample = None
         self.path_len = 0.0
@@ -148,14 +161,27 @@ class ScaleAligner(Node):
         if len(msg.data) < 2:
             return
         epoch = msg.data[1]
-        if epoch != self.epoch:
-            if self.epoch is not None:
-                self.get_logger().info(
-                    f"맵 epoch {self.epoch} -> {epoch}: 스케일을 다시 구한다 "
-                    "(map->odom 은 이어받는다)"
-                )
-            self.epoch = epoch
-            self._reset_map()
+        if epoch == self.epoch:
+            return
+        prev, self.epoch = self.epoch, epoch
+        self._reset_map()
+        self.map_key = msg.data[3] if len(msg.data) >= 5 else None
+        reason = msg.data[4] if len(msg.data) >= 5 else EPOCH_NEW_MAP
+
+        if reason == EPOCH_NEW_MAP:
+            self.map_scales.pop(self.map_key, None)
+        elif self.map_key in self.map_scales:
+            self.scale = self.map_scales[self.map_key]
+            self.scale_inherited = True
+            self.get_logger().info(
+                f"맵 epoch {prev} -> {epoch}: 기존 맵(key {self.map_key})으로 전환 — "
+                f"그 맵의 스케일 {self.scale:.3f} m 를 이어 쓴다 (map->odom 은 이어받는다)"
+            )
+            return
+        if prev is not None:
+            self.get_logger().info(
+                f"맵 epoch {prev} -> {epoch}: 스케일을 다시 구한다 (map->odom 은 이어받는다)"
+            )
 
     # ── 포즈 처리 ────────────────────────────────────────────────
     def _lookup(self, target, source, stamp, timeout=0.05):
@@ -248,7 +274,15 @@ class ScaleAligner(Node):
             self.get_logger().info(
                 f"스케일 확정: 1 ORB 단위 = {new_scale:.3f} m ({keep.sum()}/{len(seg)} 구간)"
             )
+        elif self.scale_inherited:
+            self.get_logger().info(
+                f"스케일 재추정: 이어 쓴 {self.scale:.3f} m -> {new_scale:.3f} m "
+                f"({keep.sum()}/{len(seg)} 구간)"
+            )
         self.scale = new_scale
+        self.scale_inherited = False
+        if self.map_key is not None:
+            self.map_scales[self.map_key] = new_scale
 
     # ── 출력 ─────────────────────────────────────────────────────
     def publish_tf(self):
