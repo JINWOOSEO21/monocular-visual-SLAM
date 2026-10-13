@@ -4,6 +4,14 @@
 입력 (둘 다 같은 맵, orb_world 프레임, 스케일 없는 ORB 단위)
     --trajectory  키프레임 궤적, TUM 형식: t tx ty tz qx qy qz qw  (T_world_cam)
     --points      맵 포인트, ASCII PLY: x y z [observations]
+    --events      (선택) 그 실행의 launch.log. mono_node 가 남긴 새 맵 / 맵 병합 / 루프 클로저
+                  시각을 읽어 그림에 표시한다. launch.log 의 줄 앞 시각(벽시계)을 쓰므로
+                  실시간 실행 기준이다 (rosbag 재생이면 시각이 맞지 않는다).
+
+출력 (여러 개를 함께 줄 수 있다. 아무것도 없으면 정적 그림을 창으로 띄운다)
+    --out      정적 그림 (.png / .pdf). 위에서 본 그림 + 옆에서 본 그림
+    --animate  주행 애니메이션 (.gif). 궤적이 시간 순서대로 그려진다
+    --html     브라우저에서 돌려 보는 3D 뷰어 (자체 완결 HTML, Plotly 는 CDN 에서 읽는다)
 
 orb_world 는 맵을 시작한 키프레임의 카메라 광학 프레임(x 오른쪽, y 아래, z 앞)이다.
 카메라가 기울어 달려 있으면 이 프레임도 기울어 있어서, 평지를 달려도 궤적이 위아래로
@@ -22,10 +30,13 @@ orb_world 는 맵을 시작한 키프레임의 카메라 광학 프레임(x 오�
 (scale_aligner 가 출력한 "1 ORB 단위 = s m") 미터가 된다.
 
     ros2 run orb_slam plot_map --scale 2.39
-    ros2 run orb_slam plot_map --level mount --pitch-deg 17.5 --out map.png
+    ros2 run orb_slam plot_map --level mount --pitch-deg 20 --out map.png
+    ros2 run orb_slam plot_map --scale 2.6 --events ~/.ros/log/<실행>/launch.log \\
+        --name test_1820 --out map.png --animate run.gif --html viewer.html
 """
 
 import argparse
+import json
 import math
 from pathlib import Path
 
@@ -33,14 +44,24 @@ import numpy as np
 
 ORB_DIR = Path("~/.ros/orbslam3").expanduser()
 
+# launch.log 에서 찾을 mono_node 메시지 -> 이벤트 종류
+EVENT_PATTERNS = (
+    ("new_map", "새 맵 초기화"),
+    ("map_switch", "현재 맵이 바뀜"),
+    ("loop", "*Loop detected"),
+)
+EVENT_LABELS_EN = {"new_map": "new map", "map_switch": "map merge", "loop": "loop closure"}
 
+
+# ── 입력 ──────────────────────────────────────────────────────────
 def load_trajectory(path):
+    """(시각, 위치 Nx3, 쿼터니언 Nx4 [qx qy qz qw]) 를 돌려준다."""
     data = np.loadtxt(path, ndmin=2)
     if data.size == 0:
         raise SystemExit(
             f"{path} 가 비어 있다. 종료 시점의 현재 맵에 키프레임이 없었다 (막 새로 만든 맵)."
         )
-    return data[:, 0], data[:, 1:4]
+    return data[:, 0], data[:, 1:4], data[:, 4:8]
 
 
 def load_ply(path):
@@ -65,6 +86,24 @@ def load_ply(path):
     return {name: rows[:, i] for i, name in enumerate(names)}
 
 
+def load_events(path):
+    """launch.log 에서 (시각, 종류) 목록을 읽는다. 줄 앞의 숫자가 기록 시각이다."""
+    events = []
+    with Path(path).expanduser().open(errors="replace") as f:
+        for line in f:
+            head, _, rest = line.partition(" ")
+            try:
+                t = float(head)
+            except ValueError:
+                continue
+            for kind, key in EVENT_PATTERNS:
+                if key in rest:
+                    events.append((t, kind))
+                    break
+    return events
+
+
+# ── 수평 정렬 ─────────────────────────────────────────────────────
 def fit_up(positions):
     """궤적 평면의 법선(위쪽)과, 평면이 잘 정해졌는지(두 번째/첫 번째 특이값 비)를 구한다."""
     centered = positions - positions.mean(axis=0)
@@ -98,13 +137,555 @@ def elevation_deg(up):
     return math.degrees(math.atan2(up[2], -up[1]))
 
 
+def optical_axis(quats):
+    """T_world_cam 쿼터니언들에서 카메라 광축(카메라 z)의 월드 방향."""
+    x, y, z, w = quats.T
+    return np.column_stack([2 * (x * z + y * w), 2 * (y * z - x * w), 1 - 2 * (x * x + y * y)])
+
+
+# ── 실행 데이터 정리 ──────────────────────────────────────────────
+class Run:
+    """수평 정렬·스케일을 적용한 한 실행의 궤적, 진행 방향, 맵 포인트, 이벤트."""
+
+    def __init__(self, args):
+        self.name = args.name or Path(args.trajectory).stem
+        self.scale = args.scale
+        self.scale_approx = args.scale_approx
+        self.unit = "m" if args.scale != 1.0 else "ORB units"
+        stamps, traj, quats = load_trajectory(args.trajectory)
+
+        self.pca_up, self.spread = fit_up(traj) if len(traj) >= 3 else (None, 0.0)
+        level = args.level
+        if level == "pca" and (self.pca_up is None or self.spread < 0.05):
+            print("궤적이 거의 직선이라 바닥 평면을 정할 수 없다 -> --level mount 로 그린다")
+            level = "mount"
+        if level == "pca":
+            axes = axes_from_up(self.pca_up)
+        elif level == "mount":
+            axes = mount_axes(args.pitch_deg)
+        else:
+            axes = mount_axes(0.0)
+        self.level = level
+        self.pitch_deg = args.pitch_deg
+
+        origin = traj[0]
+        self.t = stamps - stamps[0]
+        self.t0 = stamps[0]
+        self.xyz = (traj - origin) @ axes.T * args.scale
+        heading = optical_axis(quats) @ axes.T
+        self.yaw = np.arctan2(heading[:, 1], heading[:, 0])
+        steps = np.linalg.norm(np.diff(self.xyz, axis=0), axis=1)
+        self.path_len = float(steps.sum())
+
+        self.pts = np.empty((0, 3))
+        self.obs = np.empty(0)
+        self.n_points_file = 0
+        if Path(args.points).is_file():
+            ply = load_ply(args.points)
+            pts = np.column_stack([ply["x"], ply["y"], ply["z"]]) if ply else np.empty((0, 3))
+            obs = ply.get("observations", np.full(len(pts), args.min_obs))
+            keep = obs >= args.min_obs
+            self.n_points_file = len(pts)
+            self.pts = (pts[keep] - origin) @ axes.T * args.scale
+            self.obs = obs[keep]
+            print(f"맵 포인트 {len(pts)} 개 중 관측 {args.min_obs} 회 이상 {len(self.pts)} 개")
+        else:
+            print(f"맵 포인트 파일이 없어 궤적만 그린다: {args.points}")
+
+        # 이벤트는 궤적 시간 안의 것만, 가장 가까운 키프레임에 붙인다. 첫 "새 맵" 은 이 지도의
+        # 초기화 자체라 시작 표시와 같으므로 뺀다 (첫 키프레임 시각은 초기화를 기다리기 시작한
+        # 프레임이라 초기화 메시지보다 수십 초 이를 수 있다).
+        self.events = []
+        if args.events:
+            first_map_skipped = False
+            for ts, kind in load_events(args.events):
+                if kind == "new_map" and not first_map_skipped:
+                    first_map_skipped = True
+                    continue
+                rel = ts - self.t0
+                if rel < -1.0 or rel > self.t[-1] + 1.0:
+                    continue
+                k = int(np.clip(np.searchsorted(self.t, rel), 0, len(self.t) - 1))
+                self.events.append((rel, kind, k))
+            print(f"이벤트 {len(self.events)} 개: "
+                  + ", ".join(f"{EVENT_LABELS_EN[k]} {t:.1f}s" for t, k, _ in self.events))
+
+    def summary(self):
+        print(f"키프레임 {len(self.xyz)} 개, {self.t[-1]:.1f} s, "
+              f"경로 길이 {self.path_len:.2f} {self.unit}")
+        print(f"수평 정렬: {self.level}"
+              + (f" (pitch {self.pitch_deg:.1f} deg)" if self.level == "mount" else ""))
+        if self.pca_up is not None:
+            print(f"궤적 평면으로 추정한 카메라 들림 각도 {elevation_deg(self.pca_up):.1f} deg, "
+                  f"좌우 기울기 {math.degrees(math.asin(self.pca_up[0])):.1f} deg "
+                  f"(평면 신뢰도 {self.spread:.2f}, 0.05 미만이면 불확실)")
+        print(f"정렬 후 키프레임 높이: 표준편차 {self.xyz[:, 2].std():.3f} {self.unit}, "
+              f"범위 {np.ptp(self.xyz[:, 2]):.3f} {self.unit}  (평지 주행이면 0 에 가까워야 한다)")
+
+    def view_box(self, margin=None):
+        """궤적을 중심으로 한 위에서 본 그림의 범위. 멀리 튄 맵 포인트에 끌려가지 않는다."""
+        lo, hi = self.xyz[:, :2].min(axis=0), self.xyz[:, :2].max(axis=0)
+        if margin is None:
+            margin = 0.35 * float(max(hi - lo))
+        return lo - margin, hi + margin
+
+    def points_in(self, lo, hi):
+        m = np.all((self.pts[:, :2] >= lo) & (self.pts[:, :2] <= hi), axis=1)
+        return self.pts[m]
+
+    def stats_line(self):
+        scale = f"{'≈' if self.scale_approx else ''}{self.scale:g} m per ORB unit"
+        return (f"{self.t[-1]:.0f} s  ·  {self.path_len:.1f} {self.unit} driven  ·  "
+                f"{len(self.xyz)} keyframes  ·  {len(self.pts)} map points  ·  scale {scale}")
+
+
+# ── 정적 그림 ─────────────────────────────────────────────────────
+def _height_limits(z):
+    if len(z) == 0:
+        return 0.0, 1.0
+    lo, hi = np.percentile(z, [2, 98])
+    return float(lo), float(max(hi, lo + 1e-6))
+
+
+def plot_static(run, out, zrange=None):
+    import matplotlib
+    if out:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    lo, hi = run.view_box()
+    fig, (top, side) = plt.subplots(
+        1, 2, figsize=(14, 7), gridspec_kw={"width_ratios": [3, 2]}, constrained_layout=True
+    )
+    fig.suptitle(run.name, fontsize=15, fontweight="bold")
+
+    pts = run.points_in(lo, hi)
+    zlo, zhi = _height_limits(pts[:, 2])
+    top_pts = pts
+    if zrange:
+        top_pts = pts[(pts[:, 2] >= zrange[0]) & (pts[:, 2] <= zrange[1])]
+    if len(top_pts):
+        order = np.argsort(top_pts[:, 2])  # 높은 점이 위에 오게
+        sc = top.scatter(top_pts[order, 0], top_pts[order, 1], c=top_pts[order, 2], s=1.5,
+                         cmap="viridis", vmin=zlo, vmax=zhi, alpha=0.75, linewidths=0)
+        fig.colorbar(sc, ax=top, shrink=0.75, pad=0.01, label=f"map point height [{run.unit}]")
+        side.scatter(pts[:, 0], pts[:, 2], c=pts[:, 2], s=1.5, cmap="viridis",
+                     vmin=zlo, vmax=zhi, alpha=0.6, linewidths=0)
+
+    for ax, j in ((top, 1), (side, 2)):
+        ax.plot(run.xyz[:, 0], run.xyz[:, j], "-", c="#d1495b", lw=1.8, zorder=3,
+                label="keyframe trajectory")
+        ax.plot(run.xyz[0, 0], run.xyz[0, j], "o", ms=10, mfc="white", mec="#222", mew=2,
+                zorder=5, label="start")
+        ax.plot(run.xyz[-1, 0], run.xyz[-1, j], "s", ms=9, c="#222", zorder=5, label="end")
+        ax.grid(True, lw=0.3, alpha=0.6)
+        ax.set_xlabel(f"x forward [{run.unit}]")
+
+    # 진행 방향 화살표 (키프레임 몇 개마다)
+    step = max(1, len(run.xyz) // 28)
+    idx = np.arange(0, len(run.xyz), step)
+    arrow = 0.04 * float(max(hi - lo))
+    top.quiver(run.xyz[idx, 0], run.xyz[idx, 1], np.cos(run.yaw[idx]) * arrow,
+               np.sin(run.yaw[idx]) * arrow, angles="xy", scale_units="xy", scale=1,
+               color="#d1495b", width=0.003, zorder=4)
+
+    markers = {"map_switch": ("D", "#e09f3e", 9), "loop": ("*", "#6a4c93", 18),
+               "new_map": ("X", "#555555", 9)}
+    seen = set()
+    for t, kind, k in run.events:
+        m, color, size = markers[kind]
+        label = EVENT_LABELS_EN[kind] if kind not in seen else None
+        seen.add(kind)
+        for ax, j in ((top, 1), (side, 2)):
+            ax.plot(run.xyz[k, 0], run.xyz[k, j], m, c=color, ms=size, mec="#222", mew=0.8,
+                    zorder=6, label=label if ax is top else None)
+        if kind == "new_map":  # 보통 곧바로 병합이 뒤따르므로 라벨은 병합 쪽에만 단다
+            continue
+        top.annotate(f"{EVENT_LABELS_EN[kind]}\n{t:.0f} s", run.xyz[k, :2], xytext=(8, 8),
+                     textcoords="offset points", fontsize=8,
+                     bbox={"boxstyle": "round,pad=0.25", "fc": "white", "ec": color, "alpha": 0.9})
+
+    top.set_xlim(lo[0], hi[0])
+    top.set_ylim(lo[1], hi[1])
+    top.set_aspect("equal", adjustable="datalim")
+    top.set_ylabel(f"y left [{run.unit}]")
+    top.set_title("Top view")
+    top.legend(loc="upper right", fontsize=8, framealpha=0.9)
+    top.text(0.01, 0.01, run.stats_line(), transform=top.transAxes, fontsize=8, va="bottom",
+             bbox={"boxstyle": "round,pad=0.3", "fc": "white", "ec": "#bbb", "alpha": 0.9})
+    side.set_xlim(lo[0], hi[0])
+    side.set_ylabel(f"z up [{run.unit}]")
+    side.set_title("Side view")
+
+    if out:
+        fig.savefig(out, dpi=200)
+        print(f"저장: {out}")
+    else:
+        plt.show()
+    plt.close(fig)
+
+
+# ── 애니메이션 ────────────────────────────────────────────────────
+def animate(run, out, speed, fps):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation, PillowWriter
+
+    lo, hi = run.view_box()
+    fig, ax = plt.subplots(figsize=(8, 7), constrained_layout=True)
+    pts = run.points_in(lo, hi)
+    if len(pts):
+        zlo, zhi = _height_limits(pts[:, 2])
+        order = np.argsort(pts[:, 2])
+        ax.scatter(pts[order, 0], pts[order, 1], c=pts[order, 2], s=1.2, cmap="viridis",
+                   vmin=zlo, vmax=zhi, alpha=0.35, linewidths=0)
+    ax.plot(run.xyz[0, 0], run.xyz[0, 1], "o", ms=9, mfc="white", mec="#222", mew=2, zorder=5)
+    (line,) = ax.plot([], [], "-", c="#d1495b", lw=2.0, zorder=3)
+    (head,) = ax.plot([], [], "o", c="#d1495b", ms=8, mec="#222", zorder=6)
+    arrow_len = 0.06 * float(max(hi - lo))
+    quiv = ax.quiver([0], [0], [0], [0], angles="xy", scale_units="xy", scale=1,
+                     color="#222", width=0.006, zorder=7)
+    clock = ax.text(0.02, 0.97, "", transform=ax.transAxes, fontsize=11, va="top",
+                    family="monospace", bbox={"fc": "white", "ec": "#bbb", "alpha": 0.9})
+    banner = ax.text(0.5, 0.06, "", transform=ax.transAxes, fontsize=13, ha="center",
+                     fontweight="bold", color="white",
+                     bbox={"boxstyle": "round,pad=0.4", "fc": "#6a4c93", "ec": "none"})
+    colors = {"map_switch": "#e09f3e", "loop": "#6a4c93", "new_map": "#555555"}
+    marks = {"map_switch": "D", "loop": "*", "new_map": "X"}
+    event_artists = []
+    for _t, kind, k in run.events:
+        (a,) = ax.plot(run.xyz[k, 0], run.xyz[k, 1], marks[kind], c=colors[kind],
+                       ms=16 if kind == "loop" else 9, mec="#222", zorder=8, visible=False)
+        event_artists.append(a)
+
+    ax.set_xlim(lo[0], hi[0])
+    ax.set_ylim(lo[1], hi[1])
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.grid(True, lw=0.3, alpha=0.6)
+    ax.set_xlabel(f"x forward [{run.unit}]")
+    ax.set_ylabel(f"y left [{run.unit}]")
+    ax.set_title(f"{run.name} — ORB-SLAM3 keyframe trajectory ({speed:g}x)")
+
+    duration = float(run.t[-1])
+    n_frames = int(duration / speed * fps) + 1
+    hold = int(fps * 2)  # 끝에서 2 초 멈춘다
+
+    def draw(i):
+        tf = min(i, n_frames - 1) * speed / fps
+        k = int(np.searchsorted(run.t, tf, side="right") - 1)
+        k = max(k, 0)
+        line.set_data(run.xyz[: k + 1, 0], run.xyz[: k + 1, 1])
+        head.set_data([run.xyz[k, 0]], [run.xyz[k, 1]])
+        quiv.set_offsets([[run.xyz[k, 0], run.xyz[k, 1]]])
+        quiv.set_UVC([np.cos(run.yaw[k]) * arrow_len], [np.sin(run.yaw[k]) * arrow_len])
+        clock.set_text(f"t = {tf:6.1f} s   {np.linalg.norm(np.diff(run.xyz[: k + 1], axis=0), axis=1).sum():5.1f} {run.unit}")
+        text, color = "", None
+        for (t, kind, _k), artist in zip(run.events, event_artists):
+            artist.set_visible(t <= tf)
+            if 0 <= tf - t < 1.5 * speed:  # 이벤트 뒤 재생 시간으로 1.5 초 동안 배너를 띄운다
+                text, color = EVENT_LABELS_EN[kind], colors[kind]
+        banner.set_text(text)
+        banner.set_visible(bool(text))
+        if color:
+            banner.get_bbox_patch().set_facecolor(color)
+        return line, head, quiv, clock, banner, *event_artists
+
+    anim = FuncAnimation(fig, draw, frames=n_frames + hold, blit=False)
+    anim.save(out, writer=PillowWriter(fps=fps), dpi=90)
+    plt.close(fig)
+    print(f"저장: {out} ({n_frames + hold} 프레임, {(n_frames + hold) / fps:.1f} s)")
+
+
+# ── 3D 뷰어 HTML ──────────────────────────────────────────────────
+def export_html(run, out):
+    lo, hi = run.view_box(margin=None)
+    # 3D 에서는 궤적 주변을 조금 더 넓게 남기되, 멀리 튄 점은 뺀다
+    span = float(max(hi - lo))
+    pts = run.points_in(lo - 0.3 * span, hi + 0.3 * span)
+    if len(pts):
+        zlo, zhi = np.percentile(pts[:, 2], [0.5, 99.5])
+        pts = pts[(pts[:, 2] >= zlo) & (pts[:, 2] <= zhi)]
+    data = {
+        "name": run.name,
+        "unit": run.unit,
+        "scale": run.scale,
+        "scaleApprox": run.scale_approx,
+        "duration": round(float(run.t[-1]), 2),
+        "pathLength": round(run.path_len, 2),
+        "elevation": round(elevation_deg(run.pca_up), 1) if run.pca_up is not None else None,
+        "nPointsFile": run.n_points_file,
+        "traj": [[round(float(t), 2), *map(lambda v: round(float(v), 3), p), round(float(y), 3)]
+                 for t, p, y in zip(run.t, run.xyz, run.yaw)],
+        "points": [[round(float(v), 3) for v in p] for p in pts],
+        "events": [{"t": round(t, 1), "kind": kind, "k": k} for t, kind, k in run.events],
+    }
+    blob = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
+    html = HTML_TEMPLATE.replace("__TITLE__", f"{run.name} 주행 지도").replace("__DATA__", blob)
+    Path(out).write_text(html, encoding="utf-8")
+    print(f"저장: {out} ({len(html) / 1024:.0f} KB, 맵 포인트 {len(pts)} 개)")
+
+
+HTML_TEMPLATE = r"""<title>__TITLE__</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;600&display=swap">
+<style>
+/* layout: one-column instrument sheet - header with spec strip, 3D plot, timeline scrubber with event ticks, notes */
+:root {
+  --bg: #eef2f4; --panel: #ffffff; --ink: #14202a; --muted: #566573; --line: #d3dbe1;
+  --accent: #c2364a; --merge: #b7791f; --loop: #5b3f8c; --pt-low: #b9c7d1; --pt-high: #1f5d75;
+  --font-body: "IBM Plex Sans KR", "Noto Sans KR", "Apple SD Gothic Neo", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1418; --panel: #141d23; --ink: #e3e9ed; --muted: #95a3ae; --line: #25323b;
+    --accent: #ff6b7d; --merge: #f0b549; --loop: #b394f0; --pt-low: #34495a; --pt-high: #8fdcf2;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1418; --panel: #141d23; --ink: #e3e9ed; --muted: #95a3ae; --line: #25323b;
+  --accent: #ff6b7d; --merge: #f0b549; --loop: #b394f0; --pt-low: #34495a; --pt-high: #8fdcf2;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.55; }
+.page { max-width: 1120px; margin: 0 auto; padding-inline: 16px; padding-block: 28px 40px; display: grid; gap: 20px; }
+header { display: grid; gap: 6px; }
+.eyebrow { font-size: 13px; letter-spacing: 0.02em; color: var(--muted); }
+h1 { margin: 0; font-size: clamp(26px, 4vw, 38px); font-weight: 600; text-wrap: balance; letter-spacing: -0.01em; }
+.lede { margin: 0; color: var(--muted); max-width: 65ch; }
+.specs { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin: 0; }
+.specs div { background: var(--panel); padding: 12px 14px; display: grid; gap: 2px; min-width: 0; }
+.specs dt { font-size: 12px; color: var(--muted); }
+.specs dd { margin: 0; font-family: var(--font-mono); font-size: 20px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.specs dd small { font-size: 12px; color: var(--muted); font-weight: 400; }
+.viewer { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.viewer-bar { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.viewer-bar label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+.viewer-bar .hint { margin-left: auto; color: var(--muted); }
+.swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+#plot { width: 100%; height: clamp(380px, 68vh, 720px); }
+#plot .fallback { padding: 40px 20px; color: var(--muted); }
+.timeline { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: grid; gap: 12px; }
+.scrub { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; }
+.scrub button { font: inherit; font-size: 13px; padding: 7px 14px; border-radius: 999px; border: 1px solid var(--ink); background: var(--ink); color: var(--panel); cursor: pointer; min-width: 74px; }
+.scrub button:focus-visible, .events button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.track { position: relative; padding-top: 16px; min-width: 0; }
+.ticks { position: absolute; left: 0; right: 0; top: 0; height: 14px; }
+.ticks span { position: absolute; top: 0; width: 3px; height: 12px; border-radius: 2px; transform: translateX(-50%); }
+input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
+.clock { font-family: var(--font-mono); font-size: 13px; font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+.events { display: flex; flex-wrap: wrap; gap: 8px; }
+.events button { font: inherit; font-size: 13px; display: inline-flex; gap: 8px; align-items: center; padding: 5px 12px 5px 8px; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--ink); cursor: pointer; }
+.events button .t { font-family: var(--font-mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.events button .dot { width: 10px; height: 10px; border-radius: 50%; }
+.notes { color: var(--muted); font-size: 13px; display: grid; gap: 6px; max-width: 80ch; }
+.notes p { margin: 0; }
+.notes code { font-family: var(--font-mono); font-size: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; overflow-wrap: anywhere; }
+@media (max-width: 560px) { .scrub { grid-template-columns: auto 1fr; } .clock { grid-column: 1 / -1; } .viewer-bar .hint { margin-left: 0; } }
+</style>
+
+<div class="page">
+  <header>
+    <div class="eyebrow">ORB-SLAM3 · 단안 카메라 · 키프레임 궤적과 맵 포인트</div>
+    <h1 id="title">주행 지도</h1>
+    <p class="lede" id="lede">라즈베리파이 RC카가 단안 카메라만으로 만든 지도입니다. 끌어서 돌리고, 휠로 확대하고, 아래 타임라인으로 주행을 다시 볼 수 있습니다.</p>
+  </header>
+
+  <dl class="specs" id="specs"></dl>
+
+  <section class="viewer" aria-label="3D 지도">
+    <div class="viewer-bar">
+      <label><input type="checkbox" id="show-points" checked> <span class="swatch" id="sw-points"></span> 맵 포인트</label>
+      <label><input type="checkbox" id="show-traj" checked> <span class="swatch" id="sw-traj"></span> 키프레임 궤적</label>
+      <span class="hint">드래그: 회전 · 휠: 확대 · 우클릭 드래그: 이동</span>
+    </div>
+    <div id="plot"></div>
+  </section>
+
+  <section class="timeline" aria-label="주행 타임라인">
+    <div class="scrub">
+      <button type="button" id="play">재생</button>
+      <div class="track">
+        <div class="ticks" id="ticks" aria-hidden="true"></div>
+        <input type="range" id="time" min="0" step="1" aria-label="주행 시각">
+      </div>
+      <div class="clock" id="clock"></div>
+    </div>
+    <div class="events" id="events"></div>
+  </section>
+
+  <section class="notes" id="notes"></section>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.27.0/plotly.min.js"></script>
+<script id="run-data" type="application/json">__DATA__</script>
+<script>
+(function () {
+  const D = JSON.parse(document.getElementById("run-data").textContent);
+  const LABEL = { new_map: "새 맵 시작", map_switch: "맵 병합", loop: "루프 클로저" };
+  const COLOR_VAR = { new_map: "--muted", map_switch: "--merge", loop: "--loop" };
+  const T = D.traj, N = T.length, U = D.unit === "m" ? "m" : "ORB 단위";
+  const fmt = (v, d = 1) => Number(v).toFixed(d);
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+  document.getElementById("title").textContent = D.name + " 주행 지도";
+  const specs = [
+    ["주행 시간", fmt(D.duration, 0), "s"],
+    ["주행 거리", fmt(D.pathLength), U],
+    ["키프레임", String(N), ""],
+    ["맵 포인트", D.nPointsFile.toLocaleString("ko-KR"), ""],
+    ["카메라 들림 (추정)", D.elevation === null ? "-" : fmt(D.elevation), "°"],
+    ["스케일", (D.scaleApprox ? "≈" : "") + D.scale, "m / ORB 단위"],
+  ];
+  document.getElementById("specs").innerHTML = specs.map(([k, v, u]) =>
+    `<div><dt>${k}</dt><dd>${v} <small>${u}</small></dd></div>`).join("");
+
+  const notes = [
+    "좌표는 첫 키프레임의 차 위치를 원점으로, x 전방 · y 왼쪽 · z 위입니다. 카메라가 위로 기울어 있어 궤적에 평면을 맞춰 바닥을 수평으로 돌렸습니다.",
+    D.scaleApprox ? "스케일은 이 실행의 확정값이 로그에 남지 않아 이전 주행들의 값으로 근사했습니다. 거리에 몇 % 오차가 있을 수 있습니다." : "스케일은 scale_aligner 가 휠 오도메트리로 확정한 값입니다.",
+    "맵 포인트는 키프레임 여러 장에서 삼각측량된 ORB 특징점입니다. 색은 높이를 나타내며, 궤적에서 멀리 떨어진 점은 뺐습니다.",
+    `생성: <code>ros2 run orb_slam plot_map --html</code>`,
+  ];
+  document.getElementById("notes").innerHTML = notes.map((n) => `<p>${n}</p>`).join("");
+
+  // 타임라인
+  const slider = document.getElementById("time");
+  slider.max = String(N - 1);
+  slider.value = String(N - 1);
+  const ticks = document.getElementById("ticks");
+  const evBox = document.getElementById("events");
+  D.events.forEach((e) => {
+    const tick = document.createElement("span");
+    tick.style.left = (100 * e.t / D.duration) + "%";
+    tick.dataset.kind = e.kind;
+    tick.title = `${LABEL[e.kind]} ${fmt(e.t)} s`;
+    ticks.appendChild(tick);
+    const b = document.createElement("button");
+    b.type = "button";
+    b.dataset.kind = e.kind;
+    b.innerHTML = `<span class="dot"></span>${LABEL[e.kind]} <span class="t">${fmt(e.t)} s</span>`;
+    b.addEventListener("click", () => { stop(); setFrame(e.k); });
+    evBox.appendChild(b);
+  });
+
+  const clock = document.getElementById("clock");
+  const plotEl = document.getElementById("plot");
+  const hasPlotly = typeof window.Plotly !== "undefined";
+
+  function colors() {
+    return { bg: css("--panel"), ink: css("--ink"), muted: css("--muted"), line: css("--line"),
+      accent: css("--accent"), low: css("--pt-low"), high: css("--pt-high"),
+      merge: css("--merge"), loop: css("--loop") };
+  }
+
+  function paintChrome() {
+    const c = colors();
+    document.getElementById("sw-points").style.background = `linear-gradient(90deg, ${c.low}, ${c.high})`;
+    document.getElementById("sw-traj").style.background = c.accent;
+    ticks.querySelectorAll("span").forEach((s) => { s.style.background = css(COLOR_VAR[s.dataset.kind]); });
+    evBox.querySelectorAll("button").forEach((b) => { b.querySelector(".dot").style.background = css(COLOR_VAR[b.dataset.kind]); });
+  }
+
+  const P = D.points;
+  const col = (rows, i) => rows.map((r) => r[i]);
+  function traces(k) {
+    const c = colors();
+    const upto = T.slice(0, k + 1);
+    const ev = D.events.filter((e) => e.k <= k);
+    return [
+      { type: "scatter3d", mode: "markers", x: col(P, 0), y: col(P, 1), z: col(P, 2), hoverinfo: "skip",
+        marker: { size: 1.2, color: col(P, 2), colorscale: [[0, c.low], [1, c.high]], opacity: 0.6 },
+        visible: document.getElementById("show-points").checked },
+      { type: "scatter3d", mode: "lines", x: col(upto, 1), y: col(upto, 2), z: col(upto, 3),
+        line: { color: c.accent, width: 5 }, hoverinfo: "skip",
+        visible: document.getElementById("show-traj").checked },
+      { type: "scatter3d", mode: "markers", x: [T[k][1]], y: [T[k][2]], z: [T[k][3]],
+        marker: { size: 6, color: c.ink, symbol: "diamond" },
+        hovertemplate: `t = ${fmt(T[k][0])} s<extra></extra>` },
+      { type: "scatter3d", mode: "markers+text", x: [T[0][1]], y: [T[0][2]], z: [T[0][3]],
+        marker: { size: 5, color: c.bg, line: { color: c.ink, width: 2 } }, text: ["출발"],
+        textposition: "top center", textfont: { color: c.ink, size: 12 }, hoverinfo: "skip" },
+      { type: "scatter3d", mode: "markers", x: ev.map((e) => T[e.k][1]), y: ev.map((e) => T[e.k][2]),
+        z: ev.map((e) => T[e.k][3]), text: ev.map((e) => `${LABEL[e.kind]} ${fmt(e.t)} s`),
+        marker: { size: 7, line: { color: c.ink, width: 1 },
+          color: ev.map((e) => (e.kind === "loop" ? c.loop : e.kind === "map_switch" ? c.merge : c.muted)) },
+        hovertemplate: "%{text}<extra></extra>" },
+    ];
+  }
+
+  function layout() {
+    const c = colors();
+    const axis = (title) => ({ title: { text: title, font: { color: c.muted, size: 12 } },
+      color: c.muted, gridcolor: c.line, zerolinecolor: c.line, showbackground: false,
+      tickfont: { color: c.muted, size: 10 } });
+    return { paper_bgcolor: c.bg, plot_bgcolor: c.bg, margin: { l: 0, r: 0, t: 0, b: 0 },
+      showlegend: false, font: { family: "IBM Plex Sans KR, sans-serif", color: c.ink },
+      scene: { aspectmode: "data", xaxis: axis(`x 전방 [${U}]`), yaxis: axis(`y 왼쪽 [${U}]`),
+        zaxis: axis(`z 위 [${U}]`), camera: { eye: { x: -0.9, y: -1.5, z: 1.1 } } },
+      uirevision: "keep" };
+  }
+
+  let frame = N - 1;
+  function setFrame(k) {
+    frame = Math.max(0, Math.min(N - 1, k | 0));
+    slider.value = String(frame);
+    const dist = T.slice(1, frame + 1).reduce((s, r, i) => s + Math.hypot(r[1] - T[i][1], r[2] - T[i][2], r[3] - T[i][3]), 0);
+    clock.textContent = `t = ${fmt(T[frame][0])} / ${fmt(D.duration)} s · ${fmt(dist)} ${U}`;
+    if (hasPlotly) Plotly.react(plotEl, traces(frame), layout(), { responsive: true, displaylogo: false });
+  }
+
+  let timer = null;
+  const playBtn = document.getElementById("play");
+  function stop() { if (timer) { cancelAnimationFrame(timer); timer = null; } playBtn.textContent = "재생"; }
+  playBtn.addEventListener("click", () => {
+    if (timer) { stop(); return; }
+    if (frame >= N - 1) setFrame(0);
+    playBtn.textContent = "멈춤";
+    const total = 20000; // 주행 전체를 약 20 초에 재생
+    let last = performance.now(), acc = 0;
+    const step = (now) => {
+      acc += (now - last) / total * D.duration; last = now;
+      let k = frame;
+      while (k < N - 1 && T[k + 1][0] <= T[frame][0] + acc) k++;
+      if (k !== frame) { acc -= T[k][0] - T[frame][0]; setFrame(k); }
+      if (frame >= N - 1) { stop(); return; }
+      timer = requestAnimationFrame(step);
+    };
+    timer = requestAnimationFrame(step);
+  });
+  slider.addEventListener("input", () => { stop(); setFrame(Number(slider.value)); });
+  ["show-points", "show-traj"].forEach((id) =>
+    document.getElementById(id).addEventListener("change", () => setFrame(frame)));
+
+  function retheme() { paintChrome(); setFrame(frame); }
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", retheme);
+  new MutationObserver(retheme).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+  if (!hasPlotly) {
+    plotEl.innerHTML = '<p class="fallback">3D 뷰어 라이브러리(Plotly)를 불러오지 못했습니다. 인터넷 연결을 확인한 뒤 새로고침해 주세요. 위의 수치와 아래 타임라인은 그대로 볼 수 있습니다.</p>';
+  }
+  paintChrome();
+  setFrame(N - 1);
+})();
+</script>
+"""
+
+
 def main():
     ap = argparse.ArgumentParser(description="ORB-SLAM3 키프레임 궤적 + 맵 포인트 시각화")
     ap.add_argument("--trajectory", default=str(ORB_DIR / "kf_trajectory.txt"))
     ap.add_argument("--points", default=str(ORB_DIR / "map_points.ply"),
                     help="없으면 궤적만 그린다")
+    ap.add_argument("--events", help="그 실행의 launch.log (새 맵 / 맵 병합 / 루프 클로저 표시)")
+    ap.add_argument("--name", help="그림 제목에 쓸 실행 이름 (기본: 궤적 파일 이름)")
     ap.add_argument("--scale", type=float, default=1.0,
                     help="1 ORB 단위 = scale m (scale_aligner 의 '스케일 확정' 값)")
+    ap.add_argument("--scale-approx", action="store_true",
+                    help="스케일이 그 실행의 확정값이 아니라 근사값임을 그림에 표시한다")
     ap.add_argument("--level", choices=["pca", "mount", "none"], default="pca")
     ap.add_argument("--pitch-deg", type=float, default=0.0,
                     help="--level mount 에서 쓸 카메라 들림 각도 (위로 +)")
@@ -112,92 +693,21 @@ def main():
                     help="이 수 이상의 키프레임에서 관측된 맵 포인트만 그린다")
     ap.add_argument("--zrange", type=float, nargs=2, metavar=("ZMIN", "ZMAX"),
                     help="이 높이 범위의 맵 포인트만 위에서 본 그림에 그린다 (정렬 후 단위)")
-    ap.add_argument("--out", help="그림 저장 경로 (.png). 없으면 창으로 띄운다")
+    ap.add_argument("--out", help="정적 그림 저장 경로 (.png / .pdf)")
+    ap.add_argument("--animate", help="주행 애니메이션 저장 경로 (.gif)")
+    ap.add_argument("--speed", type=float, default=20.0, help="애니메이션 재생 배속")
+    ap.add_argument("--fps", type=int, default=12, help="애니메이션 초당 프레임")
+    ap.add_argument("--html", help="3D 뷰어 HTML 저장 경로")
     args = ap.parse_args()
 
-    stamps, traj = load_trajectory(args.trajectory)
-
-    pca_up, spread = fit_up(traj) if len(traj) >= 3 else (None, 0.0)
-    level = args.level
-    if level == "pca" and (pca_up is None or spread < 0.05):
-        print("궤적이 거의 직선이라 바닥 평면을 정할 수 없다 -> --level mount 로 그린다")
-        level = "mount"
-    if level == "pca":
-        axes = axes_from_up(pca_up)
-    elif level == "mount":
-        axes = mount_axes(args.pitch_deg)
-    else:
-        axes = mount_axes(0.0)
-
-    origin = traj[0]
-    traj_l = (traj - origin) @ axes.T * args.scale
-
-    pts_l, obs = None, None
-    if Path(args.points).is_file():
-        ply = load_ply(args.points)
-        pts = np.column_stack([ply["x"], ply["y"], ply["z"]]) if ply else np.empty((0, 3))
-        obs = ply.get("observations", np.full(len(pts), args.min_obs))
-        keep = obs >= args.min_obs
-        pts_l = (pts[keep] - origin) @ axes.T * args.scale
-        obs = obs[keep]
-        print(f"맵 포인트 {len(pts)} 개 중 관측 {args.min_obs} 회 이상 {len(pts_l)} 개")
-    else:
-        print(f"맵 포인트 파일이 없어 궤적만 그린다: {args.points}")
-
-    unit = "m" if args.scale != 1.0 else "ORB units"
-    steps = np.linalg.norm(np.diff(traj_l, axis=0), axis=1)
-    print(f"키프레임 {len(traj_l)} 개, {stamps[-1] - stamps[0]:.1f} s, "
-          f"경로 길이 {steps.sum():.2f} {unit}")
-    print(f"수평 정렬: {level}"
-          + (f" (pitch {args.pitch_deg:.1f} deg)" if level == "mount" else ""))
-    if pca_up is not None:
-        print(f"궤적 평면으로 추정한 카메라 들림 각도 {elevation_deg(pca_up):.1f} deg, "
-              f"좌우 기울기 {math.degrees(math.asin(pca_up[0])):.1f} deg "
-              f"(평면 신뢰도 {spread:.2f}, 0.05 미만이면 불확실)")
-    print(f"정렬 후 키프레임 높이: 표준편차 {traj_l[:, 2].std():.3f} {unit}, "
-          f"범위 {np.ptp(traj_l[:, 2]):.3f} {unit}  (평지 주행이면 0 에 가까워야 한다)")
-
-    import matplotlib
-    if args.out:
-        matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, (top, side) = plt.subplots(1, 2, figsize=(14, 6.5), gridspec_kw={"width_ratios": [3, 2]})
-    t = stamps - stamps[0]
-
-    if pts_l is not None and len(pts_l):
-        top_pts = pts_l
-        if args.zrange:
-            zmin, zmax = args.zrange
-            top_pts = pts_l[(pts_l[:, 2] >= zmin) & (pts_l[:, 2] <= zmax)]
-        top.scatter(top_pts[:, 0], top_pts[:, 1], s=1, c="0.6", label="map points")
-        side.scatter(pts_l[:, 0], pts_l[:, 2], s=1, c="0.6", label="map points")
-
-    for ax, (i, j) in ((top, (0, 1)), (side, (0, 2))):
-        ax.plot(traj_l[:, i], traj_l[:, j], "-", c="0.3", lw=0.8)
-        sc = ax.scatter(traj_l[:, i], traj_l[:, j], c=t, cmap="viridis", s=12, zorder=3,
-                        label="keyframes")
-        ax.plot(*traj_l[0, [i, j]], "^", c="tab:green", ms=10, zorder=4, label="start")
-        ax.plot(*traj_l[-1, [i, j]], "s", c="tab:red", ms=9, zorder=4, label="end")
-        ax.set_aspect("equal", adjustable="datalim")
-        ax.grid(True, lw=0.3)
-
-    top.set_title("Top view (x forward, y left at first keyframe)")
-    top.set_xlabel(f"x [{unit}]")
-    top.set_ylabel(f"y [{unit}]")
-    top.legend(loc="best", fontsize=8)
-    side.set_title("Side view (height should stay flat for keyframes)")
-    side.set_xlabel(f"x [{unit}]")
-    side.set_ylabel(f"z [{unit}]")
-    fig.colorbar(sc, ax=side, label="time since first keyframe [s]")
-    fig.suptitle(f"{Path(args.trajectory).name}  |  level={level}  |  scale={args.scale:g}")
-    fig.tight_layout()
-
-    if args.out:
-        fig.savefig(args.out, dpi=150)
-        print(f"저장: {args.out}")
-    else:
-        plt.show()
+    run = Run(args)
+    run.summary()
+    if args.out or not (args.animate or args.html):
+        plot_static(run, args.out, args.zrange)
+    if args.animate:
+        animate(run, args.animate, args.speed, args.fps)
+    if args.html:
+        export_html(run, args.html)
 
 
 if __name__ == "__main__":

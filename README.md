@@ -320,7 +320,19 @@ SLAM 을 Ctrl-C 로 끄면 `trajectory_path` / `map_points_path` 에 **종료 �
 ros2 run orb_slam plot_map --scale 2.39                    # 스케일 = scale_aligner 의 "스케일 확정" 값
 ros2 run orb_slam plot_map --scale 2.39 --out map.png      # 창 대신 파일로
 ros2 run orb_slam plot_map --level mount --pitch-deg 20    # 장착 각도(TF pitch 와 같은 값)로 수평 정렬
+
+# 마무리용 결과물 세 가지 (정적 그림, 주행 애니메이션, 3D 뷰어)
+ros2 run orb_slam plot_map --scale 2.6 --name test_1820 \
+    --events ~/.ros/log/<그 실행>/launch.log \
+    --out map.png --animate run.gif --html viewer.html
 ```
+
+`--events` 를 주면 그 실행의 launch.log 에서 새 맵 / 맵 병합 / 루프 클로저 시각을 읽어
+그림·애니메이션·뷰어에 표시한다 (실시간 실행 기준). `--html` 은 Plotly 로 그리는 자체
+완결 페이지라 브라우저로 바로 연다. `kf_trajectory.txt` / `map_points.ply` 는 다음 실행이
+덮어쓰므로, 남길 실행은 파일을 따로 복사해 두고 `--trajectory` / `--points` 로 넘긴다.
+저장된 궤적은 루프 클로저까지 끝난 최종 지도라 애니메이션은 최종 지도 위의 재생이다
+(주행 중 드리프트가 보정되는 모습은 rosbag 으로 `/orb_slam3/odometry` 를 남겨야 보인다).
 
 카메라가 기울어 있으면 궤적도 기울어 보이므로 바닥을 수평으로 돌려서 그린다. 기본
 `--level pca` 는 궤적에 평면을 맞추는 방식이라 장착 각도를 몰라도 된다. 출력되는
