@@ -20,6 +20,15 @@ PC. The two talk over ROS 2 DDS on the same Wi-Fi network.
 | Encoders | 2× single-channel optical encoders (pulse count only, no direction) |
 | Wheels | 65 mm diameter, 150 mm wheelbase, 40 pulses/rev (both edges) |
 
+<p align="center">
+  <img src="docs/rc_car_left.jpg" alt="RC car, front-left view" width="45%">
+  <img src="docs/rc_car_right.jpg" alt="RC car, front-right view" width="45%">
+</p>
+
+The car from the front-left (left) and front-right (right). The Pi sits in the clear case in
+the middle, and the camera is on the bracket at the front, tilted up. The USB power bank on
+top powers the Pi; the two 18650 cells next to it power the motors through the L298N.
+
 ### GPIO pinout (BCM)
 
 | Function | Pin |
