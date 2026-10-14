@@ -32,6 +32,10 @@ orb_world 는 맵을 시작한 키프레임의 카메라 광학 프레임(x 오�
 scale_aligner 가 종료 시 궤적 파일 옆에 저장한 scale.yaml(--scale-file)에서 현재 맵의
 값을 읽는다. 둘 다 없으면 ORB 단위 그대로 그린다.
 
+--max-height 를 주면 그보다 낮은 맵 포인트만 모든 출력에 그린다. 높이는 정렬 후 z 라서
+0 이 출발 시점의 카메라 높이다 (바닥이 아니다). 카메라 아래의 낮은 점들은 가구·벽의 아랫부분이라
+로봇이 다닐 수 있는 공간의 경계를 보여 준다.
+
 애니메이션과 3D 뷰어는 맵 포인트를 처음 관측된 시각에 하나씩 나타나게 해서 지도가 쌓여
 가는 모습을 보여 준다 (--static-points 면 처음부터 다 보인다). 그 시각은
     t_first 가 PLY 에 있으면   mono_node 가 기록한 값 (그 점을 관측한 가장 이른 키프레임 시각)
@@ -43,6 +47,7 @@ scale_aligner 가 종료 시 궤적 파일 옆에 저장한 scale.yaml(--scale-f
     ros2 run orb_slam plot_map --scale 2.39 --show
     ros2 run orb_slam plot_map --level mount --pitch-deg 20 --out map.png
     ros2 run orb_slam plot_map --scale 2.6 --events ~/.ros/log/<실행>/launch.log --name test_1820
+    ros2 run orb_slam plot_map --max-height 0.05 --out low_map.png --animate low_run.gif
 """
 
 import argparse
@@ -302,6 +307,11 @@ class Run:
                       + (f", 시야에 한 번도 안 든 점 {unseen} 개는 가장 가까운 키프레임 시각"
                          if unseen else ""))
             self.t_seen = np.clip(self.t_seen, 0.0, self.t[-1])
+            max_height = getattr(args, "max_height", None)
+            if max_height is not None and len(self.pts):
+                low = self.pts[:, 2] < max_height
+                print(f"높이 {max_height:g} {self.unit} 미만인 맵 포인트 {int(low.sum())} 개만 그린다")
+                self.pts, self.obs, self.t_seen = self.pts[low], self.obs[low], self.t_seen[low]
         else:
             print(f"맵 포인트 파일이 없어 궤적만 그린다: {args.points}")
 
@@ -876,6 +886,9 @@ def main():
                     help="이 수 이상의 키프레임에서 관측된 맵 포인트만 그린다")
     ap.add_argument("--zrange", type=float, nargs=2, metavar=("ZMIN", "ZMAX"),
                     help="이 높이 범위의 맵 포인트만 위에서 본 그림에 그린다 (정렬 후 단위)")
+    ap.add_argument("--max-height", type=float,
+                    help="이 높이보다 낮은 맵 포인트만 모든 출력에 그린다 "
+                         "(정렬 후 z, 0 = 출발 시점 카메라 높이)")
     ap.add_argument("--out", help="정적 그림 저장 경로 (.png / .pdf)")
     ap.add_argument("--animate", help="주행 애니메이션 저장 경로 (.gif)")
     ap.add_argument("--speed", type=float, default=20.0, help="애니메이션 재생 배속")
