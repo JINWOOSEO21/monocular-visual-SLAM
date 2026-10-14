@@ -48,7 +48,7 @@ and y forward, hence `yaw = -π/2`.
 ```
 orb-slam/
 ├── README.md
-├── docs/                       # README figures
+├── docs/                       # README figures, results of the test_1820 run
 ├── pyproject.toml              # ruff config
 ├── scripts/
 │   └── build_third_party.sh    # builds ORB-SLAM3 + Pangolin (PC only, once before colcon)
@@ -238,3 +238,27 @@ python3 src/imu_mpu6050/scripts/calibrate_accel.py
 Follow the prompts to hold the IMU in six orientations (each axis up and down). The result
 is saved to `src/imu_mpu6050/config/imu_calibration.yaml` and applied the next time
 `mpu6050_node` starts; the log should then show `Gravity check OK: |a|=9.8xx m/s²`.
+
+## Results
+
+`test_1820` (2026-10-13): one indoor loop driven slowly with the camera tilted 20° up.
+ORB-SLAM3 lost tracking once, started a new map and merged it back into the first map a
+second later (49 s). When the car came back to the start, it **detected the loop and
+closed it** (184 s), and the global bundle adjustment corrected the whole trajectory.
+
+| Duration | Distance | Keyframes | Map points | Map merge | Loop closure |
+|---|---|---|---|---|---|
+| 292 s | 12.9 m | 243 | 9,610 | 1 (49 s) | 1 (184 s) |
+
+- Scale: 2.084 m per ORB unit, from `scale_aligner` (wheel + IMU odometry).
+- The camera tilt estimated from the trajectory is 19.8° (TF: 20°), and the keyframe height
+  varies by 2 mm (std) after leveling, as expected on a flat floor.
+
+![test_1820 map: top and side view](docs/test_1820/test_1820_map.png)
+
+![test_1820 run replay, 20x](docs/test_1820/test_1820_run.gif)
+
+The animation replays the final, loop-closed map; each map point appears when it was first
+observed. The interactive 3D viewer is
+[`docs/test_1820/test_1820_viewer.html`](docs/test_1820/test_1820_viewer.html) — download it
+and open it in a browser (GitHub shows HTML files as source).
